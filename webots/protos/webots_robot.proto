@@ -1,0 +1,269 @@
+#VRML_SIM R2023b utf8
+# license: Apache License 2.0
+# license url: http://www.apache.org/licenses/LICENSE-2.0
+# This is a proto file for SmartCat ASV
+
+PROTO webots_robot [
+  field  SFVec3f     translation     0 0 0
+  field  SFRotation  rotation        0 0 1 0
+  field  SFString    name            "webots_robot"
+  field  SFString    controller      "webots_robot"
+  field  MFString    controllerArgs  []
+  field  SFString    customData      ""
+  field  SFBool      supervisor      TRUE
+  field  SFBool      synchronization TRUE
+  field  SFBool      selfCollision   TRUE
+  field  MFNode      fluidDynamics   [
+    ImmersionProperties {
+      fluidName "water"
+      dragForceCoefficients 0.3 0.9 1.2
+      dragTorqueCoefficients 0.03 0.08 0.14
+      viscousResistanceTorqueCoefficient 0.02
+    }
+  ]
+  field  SFNode      physicsModel    Physics {
+    mass 3
+    density -1
+    centerOfMass [0 0 -0.055]
+  }
+]
+{
+  Robot {
+    translation IS translation
+    rotation IS rotation
+    controller IS controller
+    controllerArgs IS controllerArgs
+    customData IS customData
+    supervisor IS supervisor
+    synchronization IS synchronization
+    selfCollision IS selfCollision
+    children [
+
+      # Body components
+      DEF BodyCat_L Transform {
+        translation 0.000000 -0.1600000 -0.05
+        children [
+          Shape {
+            appearance DEF blue PBRAppearance {
+              baseColor 1 1 1
+              roughness 1
+              metalness 0
+            }
+            geometry Box { size 0.5 0.04 0.08 }
+          }
+        ]
+      }
+      DEF BodyCat_R Transform {
+        translation 0.000000 0.160000 -0.05
+        children [
+          Shape {
+            appearance DEF blue PBRAppearance {
+              baseColor 1 1 1
+              roughness 1
+              metalness 0
+            }
+            geometry Box { size 0.5 0.04 0.08 }
+          }
+        ]
+      }
+      DEF BodyBeam Transform {
+        translation 0 0 -0.05
+        children [
+          Shape {
+            appearance DEF blue PBRAppearance {
+              baseColor 1 1 1
+              roughness 1
+              metalness 0
+            }
+            geometry Box { size 0.04 0.32 0.04 }
+          }
+        ]
+      }
+      DEF BodyController Transform {
+        translation 0 0 0.01
+        children [
+          Shape {
+            appearance DEF CPU PBRAppearance {
+              baseColor 0.8 0.8 0.8
+              roughness 1
+              metalness 0
+              transparency 0.5
+            }
+            geometry Box { size 0.17 0.25 0.08 }
+          }
+        ]
+      }
+      DEF BodyCPU Transform {
+        translation 0 0.08 0
+        children [
+          Shape {
+            appearance DEF CPU PBRAppearance {
+              baseColor 0 0.8 0
+              roughness 1
+              metalness 0
+            }
+            geometry Box { size 0.1 0.08 0.005 }
+          }
+        ]
+      }
+      DEF BodyBattery Transform {
+        translation 0 -0.04 0
+        children [
+          Shape {
+            appearance DEF CPU PBRAppearance {
+              baseColor 0 0 0.8
+              roughness 1
+              metalness 0
+            }
+            geometry Box { size 0.03 0.15 0.03 }
+          }
+        ]
+      }
+
+      # Central LiDAR package mounted on top of the controller box
+      DEF LidarBase Transform {
+        translation 0 0 0.065
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.2 0.2 0.2
+              roughness 1
+              metalness 0
+            }
+            geometry Box { size 0.095 0.070 0.030 }
+          }
+        ]
+      }
+      DEF LidarHead Transform {
+        translation 0 0 0.090
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.2 0.2 0.2
+              roughness 1
+              metalness 0
+            }
+            geometry Cylinder { radius 0.035 height 0.020 }
+          }
+        ]
+      }
+      # Small reflector box mounted just behind the lidar, with the same
+      # orientation as the lidar package, and kept within the robot's lidar
+      # minimum range so it is mostly invisible to itself.
+      DEF LidarReflector Transform {
+        translation -0.045 0 0.090
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 1 0.2 0.2
+              roughness 1
+              metalness 0
+            }
+            geometry Box { size 0.060 0.050 0.025 }
+          }
+        ]
+      }
+
+      # Motor shafts (visual)
+      DEF RightMotor Transform {
+        translation -0.05 -0.095 -0.05
+        rotation 0 1 0 1.570796
+        children [
+          Shape {
+            appearance PBRAppearance { baseColor 1 1 1 }
+            geometry Cylinder { radius 0.01 height 0.1 }
+          }
+        ]
+      }
+      DEF LeftMotor Transform {
+        translation -0.05 0.095 -0.05
+        rotation 0 1 0 1.570796
+        children [
+          Shape {
+            appearance PBRAppearance { baseColor 1 1 1 }
+            geometry Cylinder { radius 0.01 height 0.1 }
+          }
+        ]
+      }
+
+      # Visual props (no physics, fixed)
+      DEF RightProp Transform {
+        translation -0.1 -0.095 -0.05
+        rotation 0 1 0 1.570796
+        children [
+          Shape {
+            appearance PBRAppearance { baseColor 0 0 1 roughness 1 metalness 0 }
+            geometry Cylinder { radius 0.02 height 0.01 }
+          }
+        ]
+      }
+      DEF LeftProp Transform {
+        translation -0.1 0.095 -0.05
+        rotation 0 1 0 1.570796
+        children [
+          Shape {
+            appearance PBRAppearance { baseColor 0 0 1 roughness 1 metalness 0 }
+            geometry Cylinder { radius 0.02 height 0.01 }
+          }
+        ]
+      }
+
+      # Sensors wrapper
+      DEF Sensors Transform {
+        translation 0 0 0
+        children [
+          Lidar {
+            name "lidar"
+            translation 0 0 0.090
+            horizontalResolution 540
+            fieldOfView 3.141592653589793
+            numberOfLayers 1
+            near 0.05
+            minRange 0.05
+            maxRange 3.0
+            defaultFrequency 10.0
+          }
+          GPS { name "gps" }
+          Gyro { name "gyro" 
+            rotation 1 0 0 0
+            }
+          Compass { name "compass" }
+        ]
+      }
+    ]
+
+    immersionProperties IS fluidDynamics
+
+    # Robot physics
+    physics IS physicsModel
+    boundingObject Group {
+      children [
+        Transform {
+          translation 0.0 -0.16 -0.05
+          children [
+            Box {
+              size 0.5 0.04 0.08
+            }
+          ]
+        }
+        Transform {
+          translation 0.0 0.16 -0.05
+          children [
+            Box {
+              size 0.5 0.04 0.08
+            }
+          ]
+        }
+        Transform {
+          translation 0.0 0.0 -0.05
+          children [
+            Box {
+              size 0.04 0.32 0.04
+            }
+          ]
+        }
+      ]
+    }
+    name IS name
+  }
+}
