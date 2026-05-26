@@ -71,6 +71,10 @@ def N2rpm(x, fwd_lim = 1.2753, rev_lim = -0.63765):
     elif x>tol: return -5.727416623043567370E2*x**2+2.268233085499708977E3*x+2.958718669408357371E1
     else: return 2.397948698765131667E3*x**2+4.665568885752373717E3*x - -6.685183692128883879E-14
 
+# Keep heading errors continuous for the APF steering law.
+def wrap_angle(a):
+    return (a + np.pi) % (2 * np.pi) - np.pi
+
 #global function for navigation
 def extended_kalman_filter_predict(mu, Sigma, u, f, Q, dt):
     # (1) Project the state forward
@@ -165,7 +169,7 @@ class LaptopController:
         self.filename.parent.mkdir(parents=True, exist_ok=True)
         
         with self.filename.open('w') as f:
-            f.write("EpochTime(s),TimeFromStart(s),right_prop_rate(rad/s),left_prop_rate(rad/s),LastDT(s),Yaw(rad),North(m),East(m),IMUSensedYawRate(rad/s),IMUIntegratedYaw(rad),IMUSensedTimeStamp(s),ARUCOSensedNorth(m),ARUCOSensedEast(m),ARUCOSensedYaw(rad),ArucoSensedTimeStamp(s),DepthTimeStamp(s),Depth(m)\n")      
+            f.write("EpochTime(s),TimeFromStart(s),right_prop_rate(rad/s),left_prop_rate(rad/s),LastDT(s),Yaw(rad),North(m),East(m),IMUSensedYawRate(rad/s),IMUIntegratedYaw(rad),IMUSensedTimeStamp(s),ARUCOSensedNorth(m),ARUCOSensedEast(m),ARUCOSensedYaw(rad),ArucoSensedTimeStamp(s),DepthTimeStamp(s),Depth(m),APFMode,APFEncounter,APFSide,NearestObstacleNorth(m),NearestObstacleEast(m),NearestObstacleDistance(m),COLREGDCPA(m),COLREGTCPA(s)\n")
         global file 
         file = self.filename
 
@@ -237,7 +241,7 @@ class LaptopController:
 
         # ---------------- LiDAR sector parameters ----------------
         self.front_angle_limit = np.deg2rad(25)
-        self.front_block_threshold = 0.5
+        self.front_block_threshold = 0.8
         self.min_front_close_beams = 5
         self.side_angle_min = np.deg2rad(45)
         self.side_angle_max = np.deg2rad(120)
@@ -246,6 +250,88 @@ class LaptopController:
         self.front_clearance_m = np.inf
         self.left_clearance_m = np.inf
         self.right_clearance_m = np.inf
+
+        # ---------------- LiDAR/APF navigation parameters ----------------
+        # APF works in the robot body frame but keeps the mission goal in earth N/E.
+        self.apf_goal_ne = np.array([goal_north, goal_east], dtype=float)
+        # Potential field gains follow the reference APF structure:
+        # attractive field + static repulsive field + dynamic repulsive field.
+        self.apf_alpha0 = 3.0
+        self.apf_beta = 5.0
+        self.apf_rho0 = 5.5
+        # COLREG reasoning is only applied to tracked moving obstacles with CPA risk.
+        # k_m scales the dynamic influence range with relative speed, matching the demo rho0 idea.
+        self.apf_colreg_k_m = 1.5
+        # CPA must happen within this horizon before the COLREG side force is injected.
+        self.apf_colreg_time_horizon_s = 6.0
+        # DCPA below this safety domain means the predicted closest approach is unsafe.
+        self.apf_colreg_safety_domain_m = 1.0
+        # Keep COLREG activation local so distant tracks do not dominate the LiDAR APF.
+        self.apf_colreg_rho0_max_m = 4.5
+        self.apf_encounter_range_m = self.apf_colreg_rho0_max_m
+        # Dynamic obstacles are projected forward as virtual obstacles.
+        self.apf_t_pre = 2.0
+        self.apf_pred_dt = 0.25
+        self.apf_too_close_m = 0.6
+        # Control conversion parameters from APF force to body twist [v, w].
+        self.apf_gradient_weight = 0.55
+        self.apf_heading_gain = 0.8
+        self.apf_force_gain = 0.9
+        self.apf_deviation_gain = 1.5
+        self.apf_side_bias_gain = 0.5
+        self.apf_final_goal_ne = np.array([goal_north, goal_east], dtype=float)
+        # APF uses a point ahead on the route as its attraction target when avoidance is active.
+        self.apf_route_lookahead_s = 5.0
+        # APF is blended as an avoidance correction, while route tracking remains the main controller.
+        self.apf_avoidance_turn_gain = 0.4
+        # Limit the desired APF heading so the USV turns on an arc instead of spinning in place.
+        self.apf_heading_change_limit_rad = np.deg2rad(35.0)
+        self.apf_turn_min_speed = 0.04
+        self.apf_turn_align_rate_rad_s = np.deg2rad(12.0)
+        self.apf_max_avoidance_heading_rad = np.deg2rad(85.0)
+        self.apf_eps = 1e-3
+        self.apf_a_max = 0.4
+        self.apf_goal_tolerance_m = 0.30
+        # Runtime APF state used for logging, acceleration limiting and plots.
+        self.apf_prev_v_cmd = 0.0
+        self.apf_force_body = np.zeros(2, dtype=float)
+        self.apf_target_body = np.zeros(2, dtype=float)
+        self.apf_guidance_mode = "goal"
+        self.apf_encounter_mode = "none"
+        self.apf_encounter_bearing_deg = np.nan
+        self.apf_avoidance_side_sign = 0.0
+        # Diagnostics for the selected COLREG target. These values are printed in the loop.
+        self.apf_colreg_active = False
+        self.apf_colreg_rule = "none"
+        self.apf_colreg_dcpa_m = np.nan
+        self.apf_colreg_tcpa_s = np.nan
+        self.apf_colreg_rho0_m = np.nan
+        self.apf_colreg_closing_speed_m_s = np.nan
+        # Encounter-sector thresholds. Bearing is measured from own heading, clockwise to starboard.
+        self.apf_head_on_half_angle_deg = 22.5
+        self.apf_overtaking_half_angle_deg = 67.5
+        self.apf_same_heading_limit_deg = 45.0
+        self.apf_opposite_heading_limit_deg = 135.0
+        self.apf_crossing_a_limit_deg = 112.5
+        self.apf_crossing_b_start_deg = 247.5
+        # Hold the chosen side so LiDAR noise near a sector boundary does not flip commands.
+        self.apf_side_lock_s = 1.5
+        self.apf_side_lock_enter_range_m = self.apf_rho0
+        self.apf_side_lock_exit_margin_m = 0.75
+        self.apf_side_lock_exit_range_m = self.apf_side_lock_enter_range_m + self.apf_side_lock_exit_margin_m
+        self.apf_side_lock_front_half_angle_rad = np.deg2rad(100.0)
+        self.apf_side_lock_sign = 0.0
+        self.apf_side_lock_until_s = 0.0
+        self.apf_side_lock_active = False
+        self.apf_side_lock_distance_m = np.inf
+        # Lightweight track state estimates obstacle velocity from existing DBSCAN clusters.
+        self.apf_dynamic_speed_threshold_m_s = 0.03
+        self.apf_track_association_m = 0.60
+        self.apf_track_timeout_s = 1.0
+        self.apf_next_track_id = 1
+        self.apf_obstacle_tracks = []
+        if self.OPERATING_MODE == 2:
+            self.configure_webots_overtaking_apf()
         
         self.initial_state = Vector(6)
         self.initial_state[N] = start_north
@@ -333,7 +419,7 @@ class LaptopController:
         ################################################################
         # Setup trajectory
         #################################################################
-        v = 0.1 # 0.1 
+        v = 0.16 if self.OPERATING_MODE == 2 else 0.1
         a = 0.4 # 0.1 
         self.s = TrajectoryGenerate(north_path,east_path)
         self.s.path_to_trajectory(v, a)
@@ -441,6 +527,32 @@ class LaptopController:
         ############################## END OF INITIALISATION ##################
 
     ######## DEFINE FUNCTIONS HERE ##################
+    def configure_webots_overtaking_apf(self):
+        # Tuned for the Webots front-obstacle world: a slower vessel starts ahead on
+        # the same route, so the own ship should make one smooth pass and then rejoin.
+        self.apf_alpha0 = 1.8
+        self.apf_beta = 6.0
+        self.apf_rho0 = 2.8
+        self.apf_colreg_time_horizon_s = 10.0
+        self.apf_colreg_safety_domain_m = 0.75
+        self.apf_colreg_rho0_max_m = 3.2
+        self.apf_encounter_range_m = self.apf_colreg_rho0_max_m
+        self.apf_t_pre = 3.0
+        self.apf_too_close_m = 0.45
+        self.apf_gradient_weight = 0.65
+        self.apf_side_bias_gain = 0.25
+        self.apf_route_lookahead_s = 18.0
+        self.apf_avoidance_turn_gain = 0.6
+        self.apf_max_avoidance_heading_rad = np.deg2rad(70.0)
+        self.apf_side_lock_s = 5.0
+        self.apf_side_lock_enter_range_m = self.apf_rho0
+        self.apf_side_lock_exit_margin_m = 0.50
+        self.apf_side_lock_exit_range_m = (
+            self.apf_side_lock_enter_range_m + self.apf_side_lock_exit_margin_m
+        )
+        self.apf_track_association_m = 0.80
+        self.apf_track_timeout_s = 1.5
+
     def stopcommand(self):        
         Console.info("Thrusters stopping")
         control_msg = Vector3() # initially 0
@@ -508,11 +620,31 @@ class LaptopController:
 
         self.lidar_data = self.lidar_data[~np.isnan(self.lidar_data).any(axis=1)]
         self.update_lidar_obstacle_clusters()
+        # APF reuses DBSCAN clusters to estimate obstacle motion; raw LiDAR handling is unchanged.
+        self.update_apf_obstacle_tracks(self.lidar_timestamp_s)
         self.update_lidar_sectors()
         self.lidar_new = True
         self.robot_available = True
 
     # ---------------- LiDAR coordinate transforms ----------------
+    def earth_vector_to_body(self, vector_ne):
+        # Body frame convention: x is forward, y is left, gamma is yaw in earth frame.
+        pose = np.asarray(self.p_robot, dtype=float).reshape(-1)
+        yaw = pose[2]
+        c = np.cos(yaw)
+        s = np.sin(yaw)
+        vector_ne = np.asarray(vector_ne, dtype=float).reshape(2)
+
+        return np.array([
+            c * vector_ne[0] + s * vector_ne[1],
+            -s * vector_ne[0] + c * vector_ne[1],
+        ])
+
+    def earth_point_to_body(self, point_ne):
+        # Point transform is a vector transform after subtracting the EKF robot position.
+        pose = np.asarray(self.p_robot, dtype=float).reshape(-1)
+        return self.earth_vector_to_body(np.asarray(point_ne, dtype=float).reshape(2) - pose[0:2])
+
     def body_point_to_earth(self, point_body):
         pose = np.asarray(self.p_robot, dtype=float).reshape(-1)
         yaw = pose[2]
@@ -696,6 +828,880 @@ class LaptopController:
 
         close_count = int(np.sum(front_ranges < self.front_block_threshold))
         return close_count >= self.min_front_close_beams
+
+    # ---------------- APF encounter-sector helpers ----------------
+    def apf_relative_bearing_deg(self, body_angle_rad):
+        # Body LiDAR angles are positive to port/left; the encounter diagram is clockwise.
+        return float((-np.rad2deg(wrap_angle(body_angle_rad))) % 360.0)
+
+    def apf_signed_starboard_bearing_deg(self, body_angle_rad):
+        # Signed bearing used by COLREG logic: positive is starboard/right, negative is port/left.
+        return float(np.rad2deg(wrap_angle(-body_angle_rad)))
+
+    def apf_encounter_situation(self, relative_bearing_deg):
+        # Bearing-only fallback. Full COLREG classification also checks relative velocity and DCPA.
+        bearing_deg = float(relative_bearing_deg) % 360.0
+
+        if (
+            bearing_deg <= self.apf_head_on_half_angle_deg
+            or bearing_deg >= 360.0 - self.apf_head_on_half_angle_deg
+        ):
+            return "head_on"
+
+        if bearing_deg <= self.apf_crossing_a_limit_deg:
+            return "crossing_from_starboard"
+
+        if bearing_deg >= self.apf_crossing_b_start_deg:
+            return "crossing_from_port"
+
+        return "other"
+
+    def apf_requested_side_from_encounter(self, encounter_mode, body_angle_rad):
+        # Positive side sign means bias APF to port/left; negative means starboard/right.
+        # Starboard-side manoeuvres therefore use -1.0 in this body-frame convention.
+        if encounter_mode in ("head_on", "crossing_a", "crossing_from_starboard"):
+            return -1.0
+
+        if encounter_mode in ("crossing_b", "crossing_from_port", "overtaking"):
+            return 1.0
+
+        return 0.0
+
+    def apf_requested_side_from_obstacle_angle(self, body_angle_rad):
+        # For non-COLREG obstacles, lock the pass side from obstacle bearing.
+        # Positive LiDAR/body angle is port/left, so bias to starboard/right.
+        body_angle_rad = float(wrap_angle(body_angle_rad))
+
+        if not np.isfinite(body_angle_rad):
+            return 0.0
+
+        if abs(body_angle_rad) > self.apf_side_lock_front_half_angle_rad:
+            return 0.0
+
+        centre_deadband_rad = np.deg2rad(5.0)
+        if abs(body_angle_rad) <= centre_deadband_rad:
+            if self.left_clearance_m > self.right_clearance_m + 0.05:
+                return 1.0
+            if self.right_clearance_m > self.left_clearance_m + 0.05:
+                return -1.0
+            return 1.0
+
+        return -1.0 if body_angle_rad > 0.0 else 1.0
+
+    def apf_own_velocity_body(self):
+        # Use EKF velocity for CPA. If the EKF velocity is still near zero after startup,
+        # fall back to the previous forward command so collision checks do not go blind.
+        vel_ne = np.asarray(self.v_robot[0:2], dtype=float).reshape(2)
+        vel_body = self.earth_vector_to_body(vel_ne)
+
+        if not np.isfinite(vel_body).all():
+            vel_body = np.zeros(2, dtype=float)
+
+        measured_speed = float(np.linalg.norm(vel_body))
+        if measured_speed < self.apf_dynamic_speed_threshold_m_s and self.apf_prev_v_cmd > measured_speed:
+            vel_body = np.array([self.apf_prev_v_cmd, 0.0], dtype=float)
+
+        return vel_body
+
+    def apf_cpa_metrics(self, obs_pos_body, obs_vel_body, own_vel_body):
+        # CPA is evaluated in the own-ship body frame:
+        # TCPA is time to closest approach, DCPA is the distance at that instant.
+        obs_pos_body = np.asarray(obs_pos_body, dtype=float).reshape(2)
+        obs_vel_body = np.asarray(obs_vel_body, dtype=float).reshape(2)
+        own_vel_body = np.asarray(own_vel_body, dtype=float).reshape(2)
+
+        rel_vel = obs_vel_body - own_vel_body
+        rel_speed_sq = float(np.dot(rel_vel, rel_vel))
+
+        if rel_speed_sq < 1e-9:
+            return np.inf, float(np.linalg.norm(obs_pos_body))
+
+        tcpa = -float(np.dot(obs_pos_body, rel_vel)) / rel_speed_sq
+        tcpa = max(tcpa, 0.0)
+        dcpa = float(np.linalg.norm(obs_pos_body + rel_vel * tcpa))
+        return tcpa, dcpa
+
+    def apf_track_for_obstacle(self, obstacle):
+        # Match the current DBSCAN cluster back to its velocity track.
+        # The track gives us obstacle velocity, while the cluster gives current LiDAR geometry.
+        if not self.apf_obstacle_tracks:
+            return None
+
+        centre_ne = np.asarray(obstacle.get("centre_ne", [np.nan, np.nan]), dtype=float).reshape(2)
+        if not np.isfinite(centre_ne).all():
+            return None
+
+        now = float(self.latest_lidar_received_s if self.latest_lidar_received_s is not None else time.time())
+        best_track = None
+        best_distance = np.inf
+
+        for track in self.apf_obstacle_tracks:
+            if now - track["stamp_s"] > self.apf_track_timeout_s:
+                continue
+
+            dt = max(now - track["stamp_s"], 0.0)
+            predicted_pos = track["pos_ne"] + track["vel_ne"] * dt
+            distance = float(np.linalg.norm(centre_ne - predicted_pos))
+
+            if distance < best_distance:
+                best_distance = distance
+                best_track = track
+
+        association_limit = max(self.apf_track_association_m * 1.5, self.lidar_dbscan_eps_m * 2.0)
+        if best_distance <= association_limit:
+            return best_track
+
+        return None
+
+    def apf_classify_colreg_encounter(self, bearing_signed_deg, obs_heading_body_rad, own_speed, obs_speed):
+        # Simplified COLREG classifier adapted to local LiDAR tracks.
+        # bearing_signed_deg: positive starboard, negative port.
+        # obs_heading_body_rad: obstacle course expressed relative to own heading.
+        bearing_signed_deg = float(bearing_signed_deg)
+        own_speed = float(own_speed)
+        obs_speed = float(obs_speed)
+
+        relative_heading_deg = np.nan
+        if obs_speed >= self.apf_dynamic_speed_threshold_m_s:
+            relative_heading_deg = abs(float(np.rad2deg(wrap_angle(obs_heading_body_rad))))
+
+        if (
+            np.isfinite(relative_heading_deg)
+            and abs(bearing_signed_deg) <= self.apf_head_on_half_angle_deg
+            and relative_heading_deg > self.apf_opposite_heading_limit_deg
+        ):
+            # Rule 14: both vessels alter course to starboard in a head-on situation.
+            return "head_on", -1.0, "Rule 14 head-on: alter to starboard"
+
+        if (
+            np.isfinite(relative_heading_deg)
+            and abs(bearing_signed_deg) <= self.apf_overtaking_half_angle_deg
+            and relative_heading_deg < self.apf_same_heading_limit_deg
+            and own_speed > obs_speed + self.apf_dynamic_speed_threshold_m_s
+        ):
+            # Rule 13: overtaking vessel keeps clear. This implementation prefers port.
+            return "overtaking", 1.0, "Rule 13 overtaking: keep clear, prefer port"
+
+        if 0.0 < bearing_signed_deg <= self.apf_crossing_a_limit_deg:
+            # Rule 15: target on starboard side, own ship gives way by turning starboard.
+            return "crossing_from_starboard", -1.0, "Rule 15 give-way: alter to starboard"
+
+        if -self.apf_crossing_a_limit_deg <= bearing_signed_deg < 0.0:
+            # Rule 17: target on port side, own ship is stand-on unless CPA becomes unsafe.
+            return "crossing_from_port", 1.0, "Rule 17 stand-on: evasive port only if CPA unsafe"
+
+        return "other", 0.0, "none"
+
+    def apf_colreg_status_for_obstacle(self, obstacle):
+        # Build one self-contained risk record for a LiDAR obstacle.
+        # The default is inactive so static walls and untracked clusters still use normal APF.
+        body_angle_rad = float(obstacle.get("angle_rad", 0.0))
+        distance_m = float(obstacle.get("min_distance_m", obstacle.get("distance_m", np.inf)))
+        status = {
+            "active": False,
+            "side_sign": 0.0,
+            "encounter": "static_obstacle",
+            "rule": "none",
+            "bearing_deg": self.apf_relative_bearing_deg(body_angle_rad),
+            "body_angle_rad": body_angle_rad,
+            "distance_m": distance_m,
+            "dcpa_m": np.nan,
+            "tcpa_s": np.nan,
+            "rho0_m": np.nan,
+            "closing_speed_m_s": np.nan,
+        }
+
+        track = self.apf_track_for_obstacle(obstacle)
+        if track is None or track.get("hit_count", 0) < 2:
+            # A single detection has no reliable velocity, so it cannot be a COLREG target yet.
+            return status
+
+        # Predict the matched track to the current scan time before calculating bearings and CPA.
+        now = float(self.latest_lidar_received_s if self.latest_lidar_received_s is not None else time.time())
+        dt = max(now - track["stamp_s"], 0.0)
+        obs_pos_ne = track["pos_ne"] + track["vel_ne"] * dt
+        obs_pos_body = self.earth_point_to_body(obs_pos_ne)
+        obs_vel_body = self.earth_vector_to_body(track["vel_ne"])
+
+        if not np.isfinite(obs_pos_body).all() or not np.isfinite(obs_vel_body).all():
+            return status
+
+        obs_speed = float(np.linalg.norm(obs_vel_body))
+        if obs_speed < self.apf_dynamic_speed_threshold_m_s:
+            # Slow or static objects are handled by the static LiDAR potential field.
+            return status
+
+        own_vel_body = self.apf_own_velocity_body()
+        own_speed = float(np.linalg.norm(own_vel_body))
+        distance_m = float(np.linalg.norm(obs_pos_body))
+
+        if distance_m < 1e-6:
+            return status
+
+        # Recompute bearing from the predicted track position, not just the cluster centroid.
+        body_angle_rad = float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))
+        bearing_signed_deg = self.apf_signed_starboard_bearing_deg(body_angle_rad)
+        obs_heading_body_rad = float(np.arctan2(obs_vel_body[1], obs_vel_body[0]))
+        encounter, requested_side, rule = self.apf_classify_colreg_encounter(
+            bearing_signed_deg,
+            obs_heading_body_rad,
+            own_speed,
+            obs_speed,
+        )
+
+        tcpa_s, dcpa_m = self.apf_cpa_metrics(obs_pos_body, obs_vel_body, own_vel_body)
+        rel_speed = float(np.linalg.norm(own_vel_body - obs_vel_body))
+        closing_speed = float(np.dot(own_vel_body - obs_vel_body, obs_pos_body / distance_m))
+        if (
+            abs(bearing_signed_deg) <= self.apf_overtaking_half_angle_deg
+            and own_speed > obs_speed + self.apf_dynamic_speed_threshold_m_s
+            and 0.0 < closing_speed <= max(0.08, 0.6 * own_speed)
+        ):
+            # In the Webots overtaking setup the obstacle is ahead and moving in the
+            # same direction. LiDAR-centroid velocity can briefly look like head-on
+            # while the own ship is turning, so closing speed is used as a stabiliser.
+            encounter = "overtaking"
+            requested_side = 1.0
+            rule = "Rule 13 overtaking: keep clear, prefer port"
+        # Dynamic influence range from the demo: faster relative motion expands rho0.
+        rho0_m = self.apf_colreg_k_m * np.sqrt(
+            (rel_speed * self.apf_colreg_time_horizon_s) ** 2
+            + self.apf_colreg_safety_domain_m ** 2
+        )
+        rho0_m = float(np.clip(rho0_m, self.apf_rho0, self.apf_colreg_rho0_max_m))
+
+        active = (
+            requested_side != 0.0
+            and distance_m <= rho0_m
+            and closing_speed > 0.0
+            and dcpa_m < self.apf_colreg_safety_domain_m
+            and tcpa_s <= self.apf_colreg_time_horizon_s
+        )
+
+        if distance_m <= self.apf_too_close_m and requested_side != 0.0:
+            # Emergency override: if the moving vessel is already very close, enforce the rule side.
+            active = True
+
+        status.update({
+            "active": bool(active),
+            "side_sign": requested_side if active else 0.0,
+            "encounter": encounter,
+            "rule": rule,
+            "bearing_deg": self.apf_relative_bearing_deg(body_angle_rad),
+            "body_angle_rad": body_angle_rad,
+            "distance_m": distance_m,
+            "dcpa_m": dcpa_m,
+            "tcpa_s": tcpa_s,
+            "rho0_m": rho0_m,
+            "closing_speed_m_s": closing_speed,
+        })
+        return status
+
+    def apf_primary_encounter_obstacle(self):
+        # Choose the nearest LiDAR cluster inside the APF influence range for rule reasoning.
+        if not self.lidar_obstacles:
+            return None
+
+        candidates = []
+        for obstacle in self.lidar_obstacles:
+            distance_m = float(obstacle.get("min_distance_m", obstacle.get("distance_m", np.inf)))
+            if np.isfinite(distance_m) and distance_m <= self.apf_encounter_range_m:
+                candidates.append(obstacle)
+
+        if not candidates:
+            return None
+
+        return min(
+            candidates,
+            key=lambda obstacle: float(obstacle.get("min_distance_m", obstacle.get("distance_m", np.inf))),
+        )
+
+    def apf_lock_avoidance_side(
+        self,
+        requested_side,
+        encounter_mode,
+        obstacle_distance_m=None,
+        safe_distance_m=None,
+    ):
+        # Keep the side decision while the obstacle remains inside the safe exit range.
+        now_s = float(self.timefromstart) if self.timefromstart is not None else 0.0
+        safe_distance_m = (
+            self.apf_side_lock_exit_range_m
+            if safe_distance_m is None
+            else float(safe_distance_m)
+        )
+        distance_m = np.nan if obstacle_distance_m is None else float(obstacle_distance_m)
+        has_distance = np.isfinite(distance_m)
+        obstacle_still_close = has_distance and distance_m <= safe_distance_m
+        self.apf_side_lock_distance_m = distance_m if has_distance else np.inf
+
+        if requested_side == 0.0:
+            if self.apf_side_lock_sign != 0.0:
+                if obstacle_still_close:
+                    self.apf_side_lock_active = True
+                    self.apf_side_lock_until_s = max(
+                        self.apf_side_lock_until_s,
+                        now_s + self.apf_side_lock_s,
+                    )
+                    return self.apf_side_lock_sign
+
+                if not has_distance and now_s < self.apf_side_lock_until_s:
+                    self.apf_side_lock_active = True
+                    return self.apf_side_lock_sign
+
+            self.apf_side_lock_sign = 0.0
+            self.apf_side_lock_until_s = now_s
+            self.apf_side_lock_active = False
+            return 0.0
+
+        if (
+            self.apf_side_lock_sign != 0.0
+            and (obstacle_still_close or now_s < self.apf_side_lock_until_s)
+        ):
+            self.apf_side_lock_active = True
+            if obstacle_still_close:
+                self.apf_side_lock_until_s = max(
+                    self.apf_side_lock_until_s,
+                    now_s + self.apf_side_lock_s,
+                )
+            return self.apf_side_lock_sign
+
+        self.apf_side_lock_sign = float(np.sign(requested_side))
+        self.apf_side_lock_until_s = now_s + self.apf_side_lock_s
+        self.apf_side_lock_active = True
+        return self.apf_side_lock_sign
+
+    def apf_encounter_avoidance_side(self):
+        # Apply COLREG side selection only when a tracked moving obstacle has unsafe CPA.
+        if not self.lidar_obstacles:
+            self.apf_encounter_mode = "none"
+            self.apf_colreg_rule = "none"
+            self.apf_encounter_bearing_deg = np.nan
+            self.apf_colreg_active = False
+            self.apf_colreg_dcpa_m = np.nan
+            self.apf_colreg_tcpa_s = np.nan
+            self.apf_colreg_rho0_m = np.nan
+            self.apf_colreg_closing_speed_m_s = np.nan
+            self.apf_avoidance_side_sign = self.apf_lock_avoidance_side(0.0, "none")
+            return self.apf_avoidance_side_sign
+
+        statuses = []
+        for obstacle in self.lidar_obstacles:
+            distance_m = float(obstacle.get("min_distance_m", obstacle.get("distance_m", np.inf)))
+            if np.isfinite(distance_m) and distance_m <= self.apf_encounter_range_m:
+                statuses.append(self.apf_colreg_status_for_obstacle(obstacle))
+
+        if not statuses:
+            self.apf_encounter_mode = "none"
+            self.apf_colreg_rule = "none"
+            self.apf_encounter_bearing_deg = np.nan
+            self.apf_colreg_active = False
+            self.apf_colreg_dcpa_m = np.nan
+            self.apf_colreg_tcpa_s = np.nan
+            self.apf_colreg_rho0_m = np.nan
+            self.apf_colreg_closing_speed_m_s = np.nan
+            self.apf_avoidance_side_sign = self.apf_lock_avoidance_side(0.0, "none", np.inf)
+            return self.apf_avoidance_side_sign
+
+        active_statuses = [status for status in statuses if status["active"]]
+        if active_statuses:
+            # If more than one vessel is risky, prioritise the smallest DCPA, then earliest TCPA.
+            selected = min(
+                active_statuses,
+                key=lambda status: (
+                    status["dcpa_m"] if np.isfinite(status["dcpa_m"]) else np.inf,
+                    status["tcpa_s"] if np.isfinite(status["tcpa_s"]) else np.inf,
+                    status["distance_m"],
+                ),
+            )
+            requested_side = selected["side_sign"]
+            if np.isfinite(selected["rho0_m"]):
+                safe_distance_m = selected["rho0_m"] + self.apf_side_lock_exit_margin_m
+            else:
+                safe_distance_m = self.apf_side_lock_exit_range_m
+        else:
+            # Keep diagnostics from the nearest candidate and lock a pass side once it is close enough.
+            selected = min(statuses, key=lambda status: status["distance_m"])
+            requested_side = 0.0
+            safe_distance_m = self.apf_side_lock_exit_range_m
+
+            if selected["distance_m"] <= self.apf_side_lock_enter_range_m:
+                requested_side = self.apf_requested_side_from_obstacle_angle(
+                    selected.get("body_angle_rad", 0.0),
+                )
+
+        selected_body_angle = float(selected.get("body_angle_rad", np.nan))
+        if (
+            np.isfinite(selected_body_angle)
+            and abs(wrap_angle(selected_body_angle)) > self.apf_side_lock_front_half_angle_rad
+        ):
+            # Once the obstacle is well abeam or behind, stop biasing to the avoidance side
+            # so the route controller can bring the USV back to the original voyage line.
+            requested_side = 0.0
+            safe_distance_m = 0.0
+
+        side_sign = self.apf_lock_avoidance_side(
+            requested_side,
+            selected["encounter"],
+            selected["distance_m"],
+            safe_distance_m,
+        )
+
+        self.apf_encounter_mode = selected["encounter"]
+        self.apf_colreg_rule = selected["rule"]
+        self.apf_encounter_bearing_deg = selected["bearing_deg"]
+        self.apf_colreg_active = bool(selected["active"])
+        self.apf_colreg_dcpa_m = selected["dcpa_m"]
+        self.apf_colreg_tcpa_s = selected["tcpa_s"]
+        self.apf_colreg_rho0_m = selected["rho0_m"]
+        self.apf_colreg_closing_speed_m_s = selected["closing_speed_m_s"]
+        self.apf_avoidance_side_sign = side_sign
+        return side_sign
+
+    # ---------------- APF obstacle tracking and potentials ----------------
+    def update_apf_obstacle_tracks(self, stamp_s):
+        # Associate current DBSCAN centroids with previous centroids to estimate obstacle velocity.
+        # This adds dynamic APF data without changing the LiDAR or clustering pipeline.
+        now = float(stamp_s if stamp_s is not None else time.time())
+        detections = []
+
+        for obstacle in self.lidar_obstacles:
+            centre_ne = np.asarray(obstacle["centre_ne"], dtype=float).reshape(2)
+            if np.isfinite(centre_ne).all():
+                detections.append(centre_ne)
+
+        if not detections:
+            # Keep recent tracks briefly so one missed scan does not reset velocity estimates.
+            for track in self.apf_obstacle_tracks:
+                track["miss_count"] += 1
+
+            self.apf_obstacle_tracks = [
+                track for track in self.apf_obstacle_tracks
+                if now - track["stamp_s"] <= self.apf_track_timeout_s
+                and track["miss_count"] <= 5
+            ]
+            return
+
+        detections = np.asarray(detections, dtype=float)
+        candidates = []
+
+        for track_index, track in enumerate(self.apf_obstacle_tracks):
+            # Predict each track to the current scan time before nearest-neighbour matching.
+            dt = max(now - track["stamp_s"], 0.0)
+            predicted_pos = track["pos_ne"] + track["vel_ne"] * dt
+
+            for detection_index, detection in enumerate(detections):
+                distance = float(np.linalg.norm(detection - predicted_pos))
+                candidates.append((distance, track_index, detection_index))
+
+        candidates.sort(key=lambda item: item[0])
+        assigned_tracks = set()
+        assigned_detections = set()
+
+        for distance, track_index, detection_index in candidates:
+            if distance > self.apf_track_association_m:
+                break
+            if track_index in assigned_tracks or detection_index in assigned_detections:
+                continue
+
+            track = self.apf_obstacle_tracks[track_index]
+            detection = detections[detection_index]
+            dt = now - track["stamp_s"]
+
+            if 1e-3 < dt <= self.apf_track_timeout_s:
+                measured_vel = (detection - track["pos_ne"]) / dt
+                if track["hit_count"] <= 1:
+                    track["vel_ne"] = measured_vel
+                else:
+                    # Smooth velocity to reduce APF jitter from small centroid shifts.
+                    track["vel_ne"] = 0.5 * track["vel_ne"] + 0.5 * measured_vel
+            else:
+                track["vel_ne"] = np.zeros(2, dtype=float)
+
+            track["pos_ne"] = detection
+            track["stamp_s"] = now
+            track["hit_count"] += 1
+            track["miss_count"] = 0
+            assigned_tracks.add(track_index)
+            assigned_detections.add(detection_index)
+
+        for track_index, track in enumerate(self.apf_obstacle_tracks):
+            if track_index not in assigned_tracks:
+                track["miss_count"] += 1
+
+        for detection_index, detection in enumerate(detections):
+            if detection_index in assigned_detections:
+                continue
+
+            # New centroid starts as a static track until a second observation provides velocity.
+            self.apf_obstacle_tracks.append({
+                "id": self.apf_next_track_id,
+                "pos_ne": detection,
+                "vel_ne": np.zeros(2, dtype=float),
+                "stamp_s": now,
+                "hit_count": 1,
+                "miss_count": 0,
+            })
+            self.apf_next_track_id += 1
+
+        # Drop stale tracks so old obstacles do not keep generating virtual obstacles.
+        self.apf_obstacle_tracks = [
+            track for track in self.apf_obstacle_tracks
+            if now - track["stamp_s"] <= self.apf_track_timeout_s
+            and track["miss_count"] <= 5
+        ]
+
+    def apf_dynamic_obstacles_body(self):
+        # Only tracks with enough speed are treated as dynamic; slow clusters remain static APF points.
+        now = float(self.latest_lidar_received_s if self.latest_lidar_received_s is not None else time.time())
+        dynamic_obstacles = []
+
+        for track in self.apf_obstacle_tracks:
+            if now - track["stamp_s"] > self.apf_track_timeout_s:
+                continue
+            if track["hit_count"] < 2:
+                continue
+
+            speed = float(np.linalg.norm(track["vel_ne"]))
+            if speed < self.apf_dynamic_speed_threshold_m_s:
+                continue
+
+            # Dynamic repulsion is generated in the robot local frame.
+            pos_body = self.earth_point_to_body(track["pos_ne"])
+            vel_body = self.earth_vector_to_body(track["vel_ne"])
+
+            if np.isfinite(pos_body).all() and np.isfinite(vel_body).all():
+                dynamic_obstacles.append((pos_body, vel_body))
+
+        return dynamic_obstacles
+
+    def apf_static_repulsive_potential(self, q, lidar_points_body):
+        # Static APF is evaluated directly from body-frame LiDAR points.
+        # Max fusion follows the paper/reference code and avoids over-penalising dense point clouds.
+        if lidar_points_body is None or len(lidar_points_body) == 0:
+            return 0.0
+
+        q = np.asarray(q, dtype=float).reshape(2)
+        lidar_points_body = np.asarray(lidar_points_body, dtype=float)
+
+        if lidar_points_body.ndim != 2 or lidar_points_body.shape[1] != 2:
+            return 0.0
+
+        diff = q[None, :] - lidar_points_body
+        distances = np.linalg.norm(diff, axis=1)
+        distances = np.maximum(distances, 1e-3)
+
+        mask = distances < self.apf_rho0
+        if not np.any(mask):
+            return 0.0
+
+        potential = self.apf_alpha0 * (1.0 / distances[mask] - 1.0 / self.apf_rho0) ** 2
+        return float(np.max(potential))
+
+    def apf_dynamic_obstacle_sequences(self, dynamic_obstacles_body):
+        # Generate the real obstacle plus future virtual obstacles along its estimated velocity.
+        # Later virtual obstacles get larger gain, matching the growing predicted collision risk.
+        sequences = []
+        imminent_risk = False
+        n_step = max(1, int(self.apf_t_pre / self.apf_pred_dt))
+
+        for obs_pos_body, obs_vel_body in dynamic_obstacles_body:
+            obs_pos_body = np.asarray(obs_pos_body, dtype=float).reshape(2)
+            obs_vel_body = np.asarray(obs_vel_body, dtype=float).reshape(2)
+            speed = float(np.linalg.norm(obs_vel_body))
+
+            for i in range(n_step + 1):
+                q_i = obs_pos_body + obs_vel_body * self.apf_pred_dt * i
+                distance = float(np.linalg.norm(q_i))
+
+                if distance < self.apf_too_close_m:
+                    # Too-close predicted obstacles switch control to active avoidance.
+                    imminent_risk = True
+                    break
+
+                if distance < 1e-6:
+                    continue
+
+                f1 = max(1.0 - 0.3 * speed, 0.1)
+                growth = 1.0 + 0.7 * i * i
+                # Obstacles predicted behind the USV are weakened, as in the reasoning APF.
+                theta_vo = np.arccos(np.clip(q_i[0] / distance, -1.0, 1.0))
+
+                if theta_vo > np.pi / 2:
+                    f2 = max((np.pi - theta_vo) / (np.pi / 2), 0.0) ** 5
+                else:
+                    f2 = 1.0
+
+                gain = self.apf_alpha0 * f1 * growth * f2
+                sequences.append((q_i, gain))
+
+        return sequences, imminent_risk
+
+    def apf_dynamic_repulsive_potential(self, q, dynamic_sequences):
+        # Dynamic sequences are also max-fused so a cluster of virtual points does not explode force.
+        if not dynamic_sequences:
+            return 0.0
+
+        q = np.asarray(q, dtype=float).reshape(2)
+        potentials = []
+
+        for obstacle_pos_body, gain in dynamic_sequences:
+            distance = float(np.linalg.norm(q - obstacle_pos_body))
+            distance = max(distance, 1e-3)
+
+            if distance < self.apf_rho0:
+                potentials.append(gain * (1.0 / distance - 1.0 / self.apf_rho0) ** 2)
+
+        if not potentials:
+            return 0.0
+
+        return float(np.max(potentials))
+
+    def apf_total_potential(self, q, target_body, lidar_points_body, dynamic_sequences):
+        # Comprehensive local APF: target attraction + static LiDAR repulsion + dynamic prediction.
+        q = np.asarray(q, dtype=float).reshape(2)
+        target_body = np.asarray(target_body, dtype=float).reshape(2)
+        attractive = self.apf_beta * float(np.linalg.norm(target_body - q))
+        static_repulsive = self.apf_static_repulsive_potential(q, lidar_points_body)
+        dynamic_repulsive = self.apf_dynamic_repulsive_potential(q, dynamic_sequences)
+        return attractive + static_repulsive + dynamic_repulsive
+
+    def apf_numerical_gradient(self, func, q):
+        # Central-difference gradient keeps the APF implementation independent of potential details.
+        q = np.asarray(q, dtype=float).reshape(2)
+        dx = np.array([self.apf_eps, 0.0])
+        dy = np.array([0.0, self.apf_eps])
+
+        dUdx = (func(q + dx) - func(q - dx)) / (2 * self.apf_eps)
+        dUdy = (func(q + dy) - func(q - dy)) / (2 * self.apf_eps)
+
+        return np.array([dUdx, dUdy], dtype=float)
+
+    def current_body_surge_speed(self):
+        # EKF velocity is stored in earth frame; APF look-ahead needs body-frame surge.
+        H_eb = HomogeneousTransformation(self.p_robot[0:2], self.p_robot[2])
+        v_body = Inverse(H_eb.H_R) @ self.v_robot
+        return float(v_body[0, 0])
+
+    def compute_route_tracking_control(self, t):
+        # The route from the start waypoint to the goal waypoint is the primary plan.
+        p_ref, u_ref = self.s.p_u_sample(t)
+
+        # Convert route error into the robot body frame:
+        # forward error adjusts speed, lateral error adjusts yaw rate.
+        current_ne = np.array([self.North, self.East], dtype=float)
+        ref_ne = np.array([float(p_ref[0, 0]), float(p_ref[1, 0])], dtype=float)
+        error_body = self.earth_vector_to_body(ref_ne - current_ne)
+        heading_error = wrap_angle(float(p_ref[2, 0]) - float(self.Yaw))
+
+        ds = Vector(3)
+        ds[0, 0] = error_body[0]
+        ds[1, 0] = error_body[1]
+        ds[2, 0] = heading_error
+
+        # Feed-forward route velocity plus feedback keeps the robot on the planned route.
+        u_track = u_ref + self.feedback_control(ds, self.ks, self.kn, self.kg)
+        return p_ref, u_ref, u_track
+
+    def apf_avoidance_needed(self):
+        # Keep APF out of route tracking unless an obstacle is close enough to matter.
+        if self.front_blocked() or self.apf_side_lock_active:
+            return True
+
+        if self.nearest_lidar_obstacle is not None:
+            nearest_distance = float(
+                self.nearest_lidar_obstacle.get(
+                    "min_distance_m",
+                    self.nearest_lidar_obstacle.get("distance_m", np.inf),
+                )
+            )
+            nearest_angle = float(self.nearest_lidar_obstacle.get("angle_rad", np.inf))
+            obstacle_in_forward_sector = (
+                np.isfinite(nearest_angle)
+                and abs(wrap_angle(nearest_angle)) <= self.apf_side_lock_front_half_angle_rad
+            )
+            if (
+                np.isfinite(nearest_distance)
+                and nearest_distance <= self.apf_rho0
+                and obstacle_in_forward_sector
+            ):
+                return True
+
+        for obs_pos_body, _ in self.apf_dynamic_obstacles_body():
+            obs_distance = float(np.linalg.norm(obs_pos_body))
+            obs_angle = float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))
+            if (
+                obs_distance <= self.apf_rho0
+                and abs(wrap_angle(obs_angle)) <= self.apf_side_lock_front_half_angle_rad
+            ):
+                return True
+
+        return False
+
+    def compute_apf_control(self):
+        # Build the APF in the EKF-centred body frame and return body twist [v, w].
+        target_body = self.earth_point_to_body(self.apf_goal_ne)
+        self.apf_target_body = target_body
+        goal_distance = float(np.linalg.norm(target_body))
+
+        u_cmd = Vector(2)
+        if goal_distance <= self.apf_goal_tolerance_m:
+            # Goal reached: publish zero twist and let the existing mission-complete flag update.
+            self.apf_prev_v_cmd = 0.0
+            self.apf_force_body = np.zeros(2, dtype=float)
+            self.apf_guidance_mode = "arrived"
+            self.apf_colreg_active = False
+            self.apf_avoidance_side_sign = 0.0
+            self.apf_side_lock_sign = 0.0
+            self.apf_side_lock_until_s = float(self.timefromstart) if self.timefromstart is not None else 0.0
+            self.apf_side_lock_active = False
+            return u_cmd
+
+        # Static obstacles come from existing LiDAR points; dynamic obstacles come from cluster tracks.
+        lidar_points_body = self.lidar_points_body
+        dynamic_obstacles_body = self.apf_dynamic_obstacles_body()
+        dynamic_sequences, imminent_risk = self.apf_dynamic_obstacle_sequences(dynamic_obstacles_body)
+
+        def potential(q):
+            return self.apf_total_potential(q, target_body, lidar_points_body, dynamic_sequences)
+
+        q0 = np.zeros(2, dtype=float)
+        surge_speed = max(self.current_body_surge_speed(), 0.0)
+        # Nesterov-style look-ahead samples the field where the USV will soon be.
+        q_exceed = np.array([surge_speed * 0.5, 0.0], dtype=float)
+
+        gradient_weight = self.apf_gradient_weight
+        if goal_distance < float(np.linalg.norm(q_exceed)):
+            # Near the goal, avoid looking past the target.
+            gradient_weight = 1.0
+
+        # The virtual APF force is the negative gradient at the current and look-ahead positions.
+        grad_now = self.apf_numerical_gradient(potential, q0)
+        grad_future = self.apf_numerical_gradient(potential, q_exceed)
+        force_body = -gradient_weight * grad_now - (1.0 - gradient_weight) * grad_future
+
+        force_norm = float(np.linalg.norm(force_body))
+        if not np.isfinite(force_norm) or force_norm < 1e-6:
+            # Degenerate field fallback: keep a tiny force towards the goal.
+            force_body = target_body / max(goal_distance, 1e-6) * 1e-3
+            force_norm = float(np.linalg.norm(force_body))
+
+        force_offset = wrap_angle(float(np.arctan2(force_body[1], force_body[0])))
+        blocked_front = self.front_blocked()
+        encounter_side_sign = self.apf_encounter_avoidance_side()
+
+        if encounter_side_sign != 0.0 and (self.apf_colreg_active or self.apf_side_lock_active):
+            # Once avoidance starts, keep biasing the selected side until the obstacle exits safely.
+            side_bias = self.apf_side_bias_gain * max(force_norm, self.apf_beta)
+            force_body = force_body + np.array([0.0, encounter_side_sign * side_bias], dtype=float)
+            force_norm = float(np.linalg.norm(force_body))
+        elif blocked_front and abs(force_offset) > np.pi / 2:
+            # If APF points backward and no encounter rule is active, bias toward the clearer side.
+            requested_side = 1.0 if self.left_clearance_m >= self.right_clearance_m else -1.0
+            side_sign = self.apf_lock_avoidance_side(
+                requested_side,
+                "clearance",
+                self.front_clearance_m,
+            )
+            self.apf_avoidance_side_sign = side_sign
+            side_bias = self.apf_side_bias_gain * max(force_norm, self.apf_beta)
+            force_body = force_body + np.array([0.0, side_sign * side_bias], dtype=float)
+            force_norm = float(np.linalg.norm(force_body))
+
+        force_offset = wrap_angle(float(np.arctan2(force_body[1], force_body[0])))
+        avoidance_active = (
+            blocked_front
+            or imminent_risk
+            or self.apf_colreg_active
+            or self.apf_side_lock_active
+        )
+
+        if avoidance_active and abs(force_offset) > self.apf_max_avoidance_heading_rad:
+            # Do not let obstacle repulsion turn the USV back along its incoming path.
+            side_sign = self.apf_avoidance_side_sign
+
+            if side_sign == 0.0:
+                side_sign = np.sign(force_offset)
+
+            if side_sign == 0.0:
+                side_sign = 1.0 if self.left_clearance_m >= self.right_clearance_m else -1.0
+
+            capped_offset = side_sign * self.apf_max_avoidance_heading_rad
+            force_body = force_norm * np.array(
+                [np.cos(capped_offset), np.sin(capped_offset)],
+                dtype=float,
+            )
+            force_offset = capped_offset
+
+        if abs(force_offset) > self.apf_heading_change_limit_rad:
+            turn_sign = np.sign(force_offset)
+
+            if turn_sign == 0.0:
+                turn_sign = 1.0 if self.left_clearance_m >= self.right_clearance_m else -1.0
+
+            force_offset = turn_sign * self.apf_heading_change_limit_rad
+            force_body = force_norm * np.array(
+                [np.cos(force_offset), np.sin(force_offset)],
+                dtype=float,
+            )
+
+        self.apf_force_body = force_body
+        target_offset = wrap_angle(float(np.arctan2(target_body[1], target_body[0])))
+        avoidance_risk = imminent_risk or self.apf_colreg_active or self.apf_side_lock_active
+
+        # In this body-frame convention, positive offset means the desired force is to port/left.
+        w_limit = self.w_max
+        if not avoidance_risk and abs(target_offset) > np.pi / 2:
+            w_limit = min(w_limit, self.apf_turn_align_rate_rad_s)
+
+        w_cmd = self.apf_heading_gain * force_offset
+        w_cmd = float(np.clip(w_cmd, -w_limit, w_limit))
+
+        # Linear speed uses force magnitude but is reduced when the force points sideways/backward.
+        v_cmd = self.apf_force_gain * force_norm
+        v_cmd = float(np.clip(v_cmd, 0.0, self.v_max))
+        v_cmd *= max(np.cos(force_offset), 0.0)
+
+        if not avoidance_risk:
+            # Limited avoidance mode: do not move far away from the goal unless collision is imminent.
+            # During COLREG risk this limiter is relaxed so the required manoeuvre can develop.
+            if abs(target_offset) > np.pi / 2:
+                desired_turn_sign = np.sign(target_offset)
+
+                if desired_turn_sign != 0.0 and np.sign(w_cmd) != desired_turn_sign:
+                    w_cmd = 0.0
+                    v_cmd = 0.0
+                elif blocked_front:
+                    v_cmd = 0.0
+                elif abs(w_cmd) > 1e-6:
+                    v_cmd = max(v_cmd, self.apf_turn_min_speed)
+            else:
+                target_component = abs(np.cos(target_offset))
+                lateral_component = abs(np.sin(target_offset))
+
+                if (
+                    lateral_component > self.apf_deviation_gain * target_component
+                    and lateral_component > 1e-6
+                ):
+                    v_cmd *= self.apf_deviation_gain * target_component / lateral_component
+
+        # Apply acceleration limiting before converting body twist into thruster forces.
+        max_delta_v = self.apf_a_max * max(self.lastdt, 1e-3)
+        v_cmd = self.apf_prev_v_cmd + float(np.clip(v_cmd - self.apf_prev_v_cmd, -max_delta_v, max_delta_v))
+        v_cmd = float(np.clip(v_cmd, 0.0, self.v_max))
+        self.apf_prev_v_cmd = v_cmd
+        if imminent_risk:
+            self.apf_guidance_mode = "active_avoid"
+        elif self.apf_colreg_active:
+            self.apf_guidance_mode = "colreg_avoid"
+        elif self.apf_side_lock_active:
+            self.apf_guidance_mode = "side_lock_avoid"
+        else:
+            self.apf_guidance_mode = "goal"
+
+        u_cmd[0, 0] = v_cmd
+        u_cmd[1, 0] = w_cmd
+        return u_cmd
 
     def groundtruth_callback(self, msg):
         # generate fake aruco data at a set interval
@@ -936,36 +1942,58 @@ class LaptopController:
             self.North = self.p_robot[0][0]
             self.East = self.p_robot[1][0]
 
-            ### BASIC EKF TRAJECTORY CONTROL ####################
+            ### LIDAR + APF NAVIGATION CONTROL ##############
             t = self.timefromstart
-            p_ref, u_ref = self.s.p_u_sample(t) 
+            p_ref, u_ref, u_track = self.compute_route_tracking_control(t)
+            final_distance = float(
+                np.linalg.norm(
+                    self.apf_final_goal_ne
+                    - np.array([float(self.North), float(self.East)], dtype=float)
+                )
+            )
 
-            dp = p_ref - self.p_robot
-            dp[2] = (dp[2] + np.pi) % (2 * np.pi) - np.pi              
-            H_eb = HomogeneousTransformation(self.p_robot[0:2], self.p_robot[2])
-            ds = Inverse(H_eb.H_R) @ dp
-
-            if self.kn == None and self.kg == None:
-                self.kn = 2 * u_ref[0] / (self.L**2)
-                self.kg = u_ref[0] / self.L
+            if final_distance <= self.apf_goal_tolerance_m:
+                # Stop only at the real final goal.
                 self.u = Vector(2)
-
-            du = self.feedback_control(ds, self.ks, self.kn, self.kg)
-            self.u = u_ref + du
+                self.apf_prev_v_cmd = 0.0
+                self.apf_guidance_mode = "arrived"
+                self.apf_force_body = np.zeros(2, dtype=float)
+            elif self.apf_avoidance_needed():
+                # APF is only active during obstacle avoidance.
+                # Its attraction point follows the route ahead so it avoids while rejoining the route.
+                p_apf, _ = self.s.p_u_sample(t + self.apf_route_lookahead_s)
+                self.apf_goal_ne = np.array([float(p_apf[0, 0]), float(p_apf[1, 0])], dtype=float)
+                u_apf = self.compute_apf_control()
+                if self.apf_guidance_mode == "arrived":
+                    # The look-ahead route point can be reached before the final goal; keep tracking.
+                    self.u = u_track
+                    self.apf_guidance_mode = "track"
+                else:
+                    self.u = Vector(2)
+                    # During avoidance the route tracker can command negative surge
+                    # while the boat is angled around the obstacle. Keep APF moving
+                    # forward so the manoeuvre completes instead of spinning in place.
+                    apf_surge = float(u_apf[0, 0])
+                    if apf_surge > 1e-6:
+                        self.u[0, 0] = max(apf_surge, self.apf_turn_min_speed)
+                    else:
+                        self.u[0, 0] = apf_surge
+                    self.u[1, 0] = float(u_track[1, 0]) + self.apf_avoidance_turn_gain * float(u_apf[1, 0])
+            else:
+                # With no nearby obstacle, the robot follows the start-to-goal route directly.
+                self.u = u_track
+                self.apf_guidance_mode = "track"
+                self.apf_force_body = np.zeros(2, dtype=float)
 
             self.u[1, 0] = np.clip(self.u[1, 0], -self.w_max, self.w_max)
-            self.u[0, 0] = np.clip(self.u[0, 0], -self.v_max, self.v_max)
-
-            self.kn = 2 * self.u[0] / (self.L**2)
-            self.kg = self.u[0] / self.L
-            self.prev_sensed = t 
+            self.u[0, 0] = np.clip(self.u[0, 0], 0.0, self.v_max)
+            self.prev_sensed = t
             self.U = self.u.T
 
             v = self.U[0][0]
             w = self.U[0][1]
             F_x = self.robot.k_drag * v * abs(v)
             tau_z = self.robot.B_66 * w
-
             thrust = np.linalg.pinv(self.G) @ l2m([F_x, 0, tau_z])
             rpm_R = -N2rpm(thrust[0][0])
             rpm_L = N2rpm(thrust[1][0])
@@ -978,14 +2006,42 @@ class LaptopController:
             control_msg.y = int(self.left_rate)
 
             self.control_pub.publish(control_msg)
+            print(
+                'APF mode:', self.apf_guidance_mode,
+                'encounter:', self.apf_encounter_mode,
+                'bearing=', round(float(self.apf_encounter_bearing_deg), 1) if np.isfinite(self.apf_encounter_bearing_deg) else 'nan',
+                'side=', int(self.apf_avoidance_side_sign),
+                'DCPA=', round(float(self.apf_colreg_dcpa_m), 2) if np.isfinite(self.apf_colreg_dcpa_m) else 'nan',
+                'COLREG=', self.apf_colreg_rule,
+                'v=', round(float(v), 3),
+                'w=', round(float(w), 3),
+                'F_body=', np.round(self.apf_force_body, 3),
+            )
             print('Prop rates: R=',self.right_rate,', L=',self.left_rate,'rad/s')
 
-            if self.timefromstart >= self.trajectory_duration_s and np.isnan(self.s.t_complete):
+            if final_distance <= self.apf_goal_tolerance_m and np.isnan(self.s.t_complete):
                 self.s.t_complete = self.timefromstart
             
+        nearest_obstacle_north = np.nan
+        nearest_obstacle_east = np.nan
+        nearest_obstacle_distance = np.nan
+        if self.nearest_lidar_obstacle is not None:
+            centre_ne = np.asarray(
+                self.nearest_lidar_obstacle.get("centre_ne", [np.nan, np.nan]),
+                dtype=float,
+            ).reshape(2)
+            nearest_obstacle_north = centre_ne[0]
+            nearest_obstacle_east = centre_ne[1]
+            nearest_obstacle_distance = float(
+                self.nearest_lidar_obstacle.get(
+                    "min_distance_m",
+                    self.nearest_lidar_obstacle.get("distance_m", np.nan),
+                )
+            )
+
         ### LOG DATA ##############################
         with self.filename.open("a") as f:
-            f.write(f"{current_epoch_s},{self.timefromstart},{self.right_rate},{self.left_rate},{self.lastdt},{self.Yaw},{self.North},{self.East},{self.sensed_yaw_rate},{self.integrated_yaw},{self.sensed_imu_stamp_s},{self.sensed_pos_northings_m},{self.sensed_pos_eastings_m},{self.sensed_pos_yaw_rad}, {self.sensed_pos_stamp_s}, {self.sensed_bottom_depth_stamp_s},{self.sensed_bottom_depth_m}\n")            
+            f.write(f"{current_epoch_s},{self.timefromstart},{self.right_rate},{self.left_rate},{self.lastdt},{self.Yaw},{self.North},{self.East},{self.sensed_yaw_rate},{self.integrated_yaw},{self.sensed_imu_stamp_s},{self.sensed_pos_northings_m},{self.sensed_pos_eastings_m},{self.sensed_pos_yaw_rad}, {self.sensed_pos_stamp_s}, {self.sensed_bottom_depth_stamp_s},{self.sensed_bottom_depth_m},{self.apf_guidance_mode},{self.apf_encounter_mode},{self.apf_avoidance_side_sign},{nearest_obstacle_north},{nearest_obstacle_east},{nearest_obstacle_distance},{self.apf_colreg_dcpa_m},{self.apf_colreg_tcpa_s}\n")
         
         ### VISUALISE DATA ##############################
         if self.OPERATING_MODE != 0:

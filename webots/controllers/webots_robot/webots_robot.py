@@ -1077,7 +1077,7 @@ class WebotsController(Supervisor):
                 pose_val[2],
                 0.0,
                 0.0,
-                angle,
+                np.rad2deg(angle),
             ]
             self.udp_server.broadcast(msg)
             print('Elapsed time [s]:', elapsed_time)
