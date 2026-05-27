@@ -639,6 +639,7 @@ class WebotsController(Supervisor):
         self.control = {
             "right_rate": 0.0,
             "left_rate": 0.0,
+            "route_speed": None,
         }
 
         self.supervisor_node = None
@@ -670,13 +671,23 @@ class WebotsController(Supervisor):
                 "start_with_zero_speed": True,
             },
             "MOVING_ROBOT_2": {
-                "speed": 0.118,
-                "acceleration": 0.060,
+                "speed": 0.15,
+                "acceleration": 0.0,
                 "yaw_rate": 0.0,
                 "turn_radius": 0.0,
-                "lock_x": 4.67,
-                "wrap_y_top": 2.6,
-                "wrap_y_bottom": -3.8,
+                "lock_x": 3.8,
+                "bounce_y_top": 6.0,
+                "bounce_y_bottom": -6.0,
+                "start_with_zero_speed": True,
+            },
+            "MOVING_ROBOT_3": {
+                "speed": 0.15,
+                "acceleration": 0.0,
+                "yaw_rate": 0.0,
+                "turn_radius": 0.0,
+                "lock_x": 8.8,
+                "bounce_y_top": 6.0,
+                "bounce_y_bottom": -6.0,
                 "start_with_zero_speed": True,
             },
             "FRONT_OBSTACLE_ROBOT": {
@@ -697,7 +708,7 @@ class WebotsController(Supervisor):
             },
         }
 
-        for target_name in ("MOVING_ROBOT", "MOVING_ROBOT_2"):
+        for target_name in ("MOVING_ROBOT", "MOVING_ROBOT_2", "MOVING_ROBOT_3"):
             node = self.getFromDef(target_name)
             if node is None:
                 continue
@@ -734,11 +745,17 @@ class WebotsController(Supervisor):
             print("Warning: no front obstacle robot found; skipping obstacle update.")
 
     def control_callback(self, control_message):   
-        self.control["right_rate"] = control_message.x
-        self.control["left_rate"]  = control_message.y
+        right_rate = self._finite_float(getattr(control_message, "x", None))
+        left_rate = self._finite_float(getattr(control_message, "y", None))
+        self.control["right_rate"] = right_rate
+        self.control["left_rate"] = left_rate
+        route_speed = self._positive_float(getattr(control_message, "z", None))
+        if route_speed is not None:
+            self.control["route_speed"] = route_speed
+
         if (
             not self.moving_robot_started
-            and (abs(float(control_message.x)) > 1e-3 or abs(float(control_message.y)) > 1e-3)
+            and (abs(right_rate) > 1e-3 or abs(left_rate) > 1e-3)
         ):
             self.moving_robot_started = True
 
@@ -798,6 +815,26 @@ class WebotsController(Supervisor):
         orientation = node.getOrientation()
         return float(atan2(orientation[3], orientation[0]))
 
+    @staticmethod
+    def _finite_float(value, default=0.0):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        if not np.isfinite(number):
+            return default
+        return number
+
+    @staticmethod
+    def _positive_float(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(number) or number <= 1e-6:
+            return None
+        return number
+
     def _sync_ego_state_from_world(self):
         if self.supervisor_node is None:
             return
@@ -841,7 +878,12 @@ class WebotsController(Supervisor):
         lock_y=None,
         wrap_y_top=None,
         wrap_y_bottom=None,
+        bounce_y_top=None,
+        bounce_y_bottom=None,
+        bounce_x_left=None,
+        bounce_x_right=None,
         start_with_zero_speed=False,
+        match_ego_route_speed=False,
     ):
         if node is None:
             return None
@@ -870,6 +912,12 @@ class WebotsController(Supervisor):
             "lock_y": lock_y,
             "wrap_y_top": wrap_y_top,
             "wrap_y_bottom": wrap_y_bottom,
+            "bounce_y_top": bounce_y_top,
+            "bounce_y_bottom": bounce_y_bottom,
+            "bounce_x_left": bounce_x_left,
+            "bounce_x_right": bounce_x_right,
+            "match_ego_route_speed": bool(match_ego_route_speed),
+            "speed_scale_from_ego_route": None,
         }
 
     @staticmethod
@@ -888,7 +936,43 @@ class WebotsController(Supervisor):
             return target_speed
         return current_speed + np.sign(delta_speed) * max_step
 
+    def _sync_target_speed_to_ego_route(self, target):
+        if not target["match_ego_route_speed"]:
+            return
+
+        route_speed = self._positive_float(self.control.get("route_speed"))
+        if route_speed is None:
+            return
+
+        if target["speed_scale_from_ego_route"] is None:
+            if self.supervisor_node is None:
+                return
+
+            ego_start_position = np.array(self.supervisor_node.getPosition(), dtype=float)
+            obstacle_start_position = target["position"].copy()
+            collision_x = float(target["lock_x"]) if target["lock_x"] is not None else float(target["initial_position"][0])
+            collision_y = float(ego_start_position[1])
+
+            ego_start_to_meet_m = collision_x - float(ego_start_position[0])
+            obstacle_start_to_meet_m = abs(collision_y - float(obstacle_start_position[1]))
+            if ego_start_to_meet_m <= 1e-6:
+                return
+
+            target["speed_scale_from_ego_route"] = obstacle_start_to_meet_m / ego_start_to_meet_m
+            if obstacle_start_to_meet_m > 1e-6:
+                target["yaw"] = np.pi / 2.0 if collision_y > obstacle_start_position[1] else -np.pi / 2.0
+            print(
+                f"{target['name']} meeting speed scale:"
+                f" obstacle_distance={obstacle_start_to_meet_m:.3f} m,"
+                f" ego_distance={ego_start_to_meet_m:.3f} m,"
+                f" scale={target['speed_scale_from_ego_route']:.3f}"
+            )
+
+        target["speed"] = route_speed * target["speed_scale_from_ego_route"]
+
     def _apply_motion_target(self, target, dt):
+        self._sync_target_speed_to_ego_route(target)
+
         target["current_speed"] = self._advance_speed(
             target["current_speed"],
             target["speed"],
@@ -925,6 +1009,30 @@ class WebotsController(Supervisor):
                 target["position"] = target["initial_position"].copy()
                 target["position"][1] = float(wrap_y_bottom)
                 target["yaw"] = float(target["initial_yaw"])
+                target["current_speed"] = 0.0 if target["acceleration"] > 0.0 else float(target["speed"])
+
+        bounce_y_top = target["bounce_y_top"]
+        bounce_y_bottom = target["bounce_y_bottom"]
+        if bounce_y_top is not None and bounce_y_bottom is not None:
+            if target["position"][1] < bounce_y_bottom:
+                target["position"][1] = float(bounce_y_bottom)
+                target["yaw"] = self._wrap_to_pi(target["yaw"] + np.pi)
+                target["current_speed"] = 0.0 if target["acceleration"] > 0.0 else float(target["speed"])
+            elif target["position"][1] > bounce_y_top:
+                target["position"][1] = float(bounce_y_top)
+                target["yaw"] = self._wrap_to_pi(target["yaw"] + np.pi)
+                target["current_speed"] = 0.0 if target["acceleration"] > 0.0 else float(target["speed"])
+
+        bounce_x_left = target["bounce_x_left"]
+        bounce_x_right = target["bounce_x_right"]
+        if bounce_x_left is not None and bounce_x_right is not None:
+            if target["position"][0] < bounce_x_left:
+                target["position"][0] = float(bounce_x_left)
+                target["yaw"] = self._wrap_to_pi(target["yaw"] + np.pi)
+                target["current_speed"] = 0.0 if target["acceleration"] > 0.0 else float(target["speed"])
+            elif target["position"][0] > bounce_x_right:
+                target["position"][0] = float(bounce_x_right)
+                target["yaw"] = self._wrap_to_pi(target["yaw"] + np.pi)
                 target["current_speed"] = 0.0 if target["acceleration"] > 0.0 else float(target["speed"])
 
         target["translation_field"].setSFVec3f(target["position"].tolist())

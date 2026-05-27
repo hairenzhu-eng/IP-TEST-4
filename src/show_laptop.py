@@ -56,6 +56,11 @@ class ShowLaptop(QWidget):
         ARUCOplot = LiveScatterPlot(symbol = 'x', pen = 'green', name = 'ARUCO Sensed Position')
         WayPoint = LiveScatterPlot(symbol = 'o', pen = 'red', name = 'Waypoints')
         lidarplot = LiveScatterPlot(symbol = 'o', size = 1, pen = 'w', name = 'Lidar')
+        plannedPathPlot = LiveLinePlot(pen = 'gray', name = 'Planned Path')
+        apfForcePlot = LiveLinePlot(pen = 'yellow', name = 'APF Total Force')
+        apfRepulsivePlot = LiveLinePlot(pen = 'magenta', name = 'APF Repulsive Force')
+        apfSteeringPlot = LiveLinePlot(pen = 'cyan', name = 'APF Steering Force')
+        apfTargetPlot = LiveScatterPlot(symbol = 't', size = 10, pen = 'orange', name = 'APF Target')
         
         dtplot = LiveLinePlot(pen='blue', name = 'Laptop Update')
         Idtplot = LiveScatterPlot(symbol = 'x', pen = 'red', name = 'IMU Update')
@@ -75,6 +80,11 @@ class ShowLaptop(QWidget):
         self.ASP = DataConnector(ARUCOplot, max_points=1500)
         self.WP = DataConnector(WayPoint, max_points=1500)
         self.lidar = DataConnector(lidarplot, max_points=3000)
+        self.planned_path = DataConnector(plannedPathPlot, max_points=20)
+        self.apf_force = DataConnector(apfForcePlot, max_points=2)
+        self.apf_repulsive = DataConnector(apfRepulsivePlot, max_points=2)
+        self.apf_steering = DataConnector(apfSteeringPlot, max_points=2)
+        self.apf_target = DataConnector(apfTargetPlot, max_points=1)
         
         self.dtplot = DataConnector(dtplot, max_points=1500)
         self.Idtplot = DataConnector(Idtplot, max_points=1500)
@@ -117,7 +127,12 @@ class ShowLaptop(QWidget):
         self.positionplot.addItem(positionplot)
         self.positionplot.addItem(ARUCOplot)
         self.positionplot.addItem(WayPoint)
+        self.positionplot.addItem(plannedPathPlot)
         self.positionplot.addItem(lidarplot)
+        self.positionplot.addItem(apfForcePlot)
+        self.positionplot.addItem(apfRepulsivePlot)
+        self.positionplot.addItem(apfSteeringPlot)
+        self.positionplot.addItem(apfTargetPlot)
         self.timeplot.addItem(dtplot)
         self.timeplot.addItem(Idtplot)
         self.timeplot.addItem(Adtplot)
@@ -137,6 +152,51 @@ class ShowLaptop(QWidget):
         self._map_y_store = []
         
         
+    def _force_line_ne(self, force_body, scale=0.8):
+        if force_body is None or self.Laptop.North is None or self.Laptop.East is None:
+            return None
+
+        force_body = np.asarray(force_body, dtype=float).reshape(2)
+        if not np.isfinite(force_body).all():
+            return None
+
+        force_norm = float(np.linalg.norm(force_body))
+        if force_norm < 1e-6:
+            return None
+
+        origin_ne = np.array([float(self.Laptop.North), float(self.Laptop.East)], dtype=float)
+        force_ne = self.Laptop.body_vector_to_earth(force_body)
+        force_ne_norm = float(np.linalg.norm(force_ne))
+        if force_ne_norm < 1e-6 or not np.isfinite(force_ne_norm):
+            return None
+
+        line_len_m = min(1.2, max(0.25, scale * force_norm))
+        end_ne = origin_ne + force_ne / force_ne_norm * line_len_m
+        return [origin_ne[0], end_ne[0]], [origin_ne[1], end_ne[1]]
+
+    def _set_force_line(self, connector, force_body, scale=0.8):
+        line = self._force_line_ne(force_body, scale)
+        if line is None:
+            connector.cb_set_data([], [])
+            return
+
+        northings, eastings = line
+        connector.cb_set_data(northings, eastings)
+
+    def _update_apf_plot(self):
+        self._set_force_line(self.apf_force, getattr(self.Laptop, "apf_force_body", None), scale=0.8)
+        self._set_force_line(self.apf_repulsive, getattr(self.Laptop, "apf_repulsive_force_body", None), scale=0.8)
+        self._set_force_line(self.apf_steering, getattr(self.Laptop, "apf_steering_force_body", None), scale=0.8)
+
+        target_ne = np.asarray(
+            getattr(self.Laptop, "apf_target_ne", [np.nan, np.nan]),
+            dtype=float,
+        ).reshape(2)
+        if np.isfinite(target_ne).all():
+            self.apf_target.cb_set_data([target_ne[0]], [target_ne[1]])
+        else:
+            self.apf_target.cb_set_data([], [])
+
         
     def _update_lidar_plot(self, lidar_cloud_ne):
         lidar_timestamp_s = getattr(self.Laptop, "latest_lidar_received_s", None)
@@ -179,6 +239,10 @@ class ShowLaptop(QWidget):
             if self.loopcounter == 0 and Waypoints != None:
                 for i in range(len(Waypoints)):
                     self.WP.cb_append_data_point(Waypoints[i].y, Waypoints[i].x)
+                self.planned_path.cb_set_data(
+                    [waypoint.y for waypoint in Waypoints],
+                    [waypoint.x for waypoint in Waypoints],
+                )
             self.loopcounter = self.loopcounter + 1            
             self.TFS = time.time() - self.ST
             
@@ -213,6 +277,7 @@ class ShowLaptop(QWidget):
             if sensed_pos_northings_m != None and sensed_pos_eastings_m != None:
                 self.ASP.cb_append_data_point(sensed_pos_northings_m, sensed_pos_eastings_m)
             self._update_lidar_plot(lidar_cloud_ne)
+            self._update_apf_plot()
             
             if lastdt != None:
                 self.dtplot.cb_append_data_point(lastdt, self.TFS)
