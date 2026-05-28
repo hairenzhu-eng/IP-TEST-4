@@ -256,6 +256,7 @@ class LaptopController:
         self.goal_ne = np.array([goal_north, goal_east], dtype=float)
         self.goal_tolerance_m = 0.30
         self.navigation_mode = "track"
+        self.goal_reached = False
         self.route_path_vec_ne = self.goal_ne - self.start_ne
         self.route_path_length_m = float(np.linalg.norm(self.route_path_vec_ne))
         if self.route_path_length_m > 1e-9:
@@ -307,6 +308,13 @@ class LaptopController:
         self.apf_track_timeout_s = 1.5 if self.OPERATING_MODE == 2 else 1.0
         self.apf_next_track_id = 1
         self.apf_obstacle_tracks = []
+        self.obstacle_ekf_measurement_std_m = 0.08 if self.OPERATING_MODE == 2 else 0.12
+        self.obstacle_ekf_accel_std_m_s2 = 0.20 if self.OPERATING_MODE == 2 else 0.35
+        self.obstacle_ekf_initial_position_std_m = 0.20
+        self.obstacle_ekf_initial_velocity_std_m_s = 0.35
+        self.obstacle_prediction_horizon_s = 5.0 if self.OPERATING_MODE == 2 else 4.0
+        self.obstacle_prediction_step_s = 0.5
+        self.obstacle_history_len = 60
         self.apf_side_lock_sign = 0.0
         self.apf_side_lock_until_s = 0.0
         self.apf_side_lock_s = 5.0 if self.OPERATING_MODE != 2 else 8.0
@@ -852,39 +860,202 @@ class LaptopController:
 
         return vel_body
 
+    def obstacle_ekf_process_noise(self, dt):
+        dt = max(float(dt), 1e-3)
+        q = self.obstacle_ekf_accel_std_m_s2 ** 2
+        dt2 = dt * dt
+        dt3 = dt2 * dt
+        dt4 = dt2 * dt2
+
+        return q * np.array(
+            [
+                [0.25 * dt4, 0.0, 0.5 * dt3, 0.0],
+                [0.0, 0.25 * dt4, 0.0, 0.5 * dt3],
+                [0.5 * dt3, 0.0, dt2, 0.0],
+                [0.0, 0.5 * dt3, 0.0, dt2],
+            ],
+            dtype=float,
+        )
+
+    def obstacle_ekf_predict(self, state, covariance, dt):
+        dt = max(float(dt), 0.0)
+        state = np.asarray(state, dtype=float).reshape(4)
+        covariance = np.asarray(covariance, dtype=float).reshape(4, 4)
+
+        F = np.array(
+            [
+                [1.0, 0.0, dt, 0.0],
+                [0.0, 1.0, 0.0, dt],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=float,
+        )
+
+        predicted_state = F @ state
+        predicted_covariance = F @ covariance @ F.T + self.obstacle_ekf_process_noise(dt)
+        return predicted_state, predicted_covariance
+
+    def obstacle_ekf_update(self, state, covariance, measurement_ne):
+        state = np.asarray(state, dtype=float).reshape(4)
+        covariance = np.asarray(covariance, dtype=float).reshape(4, 4)
+        measurement_ne = np.asarray(measurement_ne, dtype=float).reshape(2)
+
+        H = np.array(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+            ],
+            dtype=float,
+        )
+        R_obs = (self.obstacle_ekf_measurement_std_m ** 2) * np.eye(2, dtype=float)
+        innovation = measurement_ne - H @ state
+        innovation_covariance = H @ covariance @ H.T + R_obs
+
+        try:
+            kalman_gain = covariance @ H.T @ np.linalg.inv(innovation_covariance)
+        except np.linalg.LinAlgError:
+            kalman_gain = covariance @ H.T @ np.linalg.pinv(innovation_covariance)
+
+        corrected_state = state + kalman_gain @ innovation
+        identity = np.eye(4, dtype=float)
+        correction = identity - kalman_gain @ H
+        corrected_covariance = correction @ covariance @ correction.T + kalman_gain @ R_obs @ kalman_gain.T
+        return corrected_state, corrected_covariance
+
+    def obstacle_track_prediction_ne(self, track):
+        state = np.asarray(track.get("state", [np.nan, np.nan, 0.0, 0.0]), dtype=float).reshape(4)
+        if not np.isfinite(state).all():
+            return np.empty((0, 2), dtype=float)
+
+        step_s = max(float(self.obstacle_prediction_step_s), 1e-3)
+        horizon_s = max(float(self.obstacle_prediction_horizon_s), step_s)
+        times = np.arange(0.0, horizon_s + 0.5 * step_s, step_s, dtype=float)
+
+        return np.column_stack(
+            [
+                state[0] + state[2] * times,
+                state[1] + state[3] * times,
+            ]
+        )
+
+    def sync_obstacle_track_fields(self, track):
+        state = np.asarray(track.get("state", [np.nan, np.nan, 0.0, 0.0]), dtype=float).reshape(4)
+        track["pos_ne"] = state[0:2].copy()
+        track["vel_ne"] = state[2:4].copy()
+
+        speed_m_s = float(np.linalg.norm(track["vel_ne"]))
+        track["speed_m_s"] = speed_m_s
+        if speed_m_s >= 1e-3:
+            heading_rad = float(np.arctan2(track["vel_ne"][1], track["vel_ne"][0]))
+            track["heading_rad"] = heading_rad
+            track["heading_deg"] = float(np.rad2deg(heading_rad))
+        else:
+            track["heading_rad"] = np.nan
+            track["heading_deg"] = np.nan
+
+        track["prediction_model"] = "ekf_constant_velocity"
+        track["prediction_ne"] = self.obstacle_track_prediction_ne(track)
+
+    def make_obstacle_track(self, detection_ne, stamp_s):
+        detection_ne = np.asarray(detection_ne, dtype=float).reshape(2)
+        covariance = np.diag(
+            [
+                self.obstacle_ekf_initial_position_std_m ** 2,
+                self.obstacle_ekf_initial_position_std_m ** 2,
+                self.obstacle_ekf_initial_velocity_std_m_s ** 2,
+                self.obstacle_ekf_initial_velocity_std_m_s ** 2,
+            ]
+        )
+        track = {
+            "id": self.apf_next_track_id,
+            "state": np.array([detection_ne[0], detection_ne[1], 0.0, 0.0], dtype=float),
+            "covariance": covariance,
+            "stamp_s": float(stamp_s),
+            "last_seen_s": float(stamp_s),
+            "hit_count": 1,
+            "miss_count": 0,
+            "history_ne": [detection_ne.copy()],
+        }
+        self.sync_obstacle_track_fields(track)
+        self.apf_next_track_id += 1
+        return track
+
+    def predict_obstacle_track_to_time(self, track, stamp_s):
+        now = float(stamp_s)
+        dt = max(now - float(track.get("stamp_s", now)), 0.0)
+        state, covariance = self.obstacle_ekf_predict(
+            track.get("state", np.r_[track.get("pos_ne", [np.nan, np.nan]), track.get("vel_ne", [0.0, 0.0])]),
+            track.get("covariance", np.eye(4, dtype=float)),
+            dt,
+        )
+        track["state"] = state
+        track["covariance"] = covariance
+        track["stamp_s"] = now
+        self.sync_obstacle_track_fields(track)
+
+    def append_obstacle_track_history(self, track):
+        history = track.setdefault("history_ne", [])
+        history.append(np.asarray(track["pos_ne"], dtype=float).reshape(2).copy())
+        if len(history) > self.obstacle_history_len:
+            del history[:-self.obstacle_history_len]
+
+    def annotate_lidar_obstacle_with_track(self, obstacle, track):
+        prediction_ne = np.asarray(track.get("prediction_ne", np.empty((0, 2))), dtype=float)
+        obstacle["track_id"] = int(track["id"])
+        obstacle["velocity_ne"] = np.asarray(track["vel_ne"], dtype=float).reshape(2).tolist()
+        obstacle["speed_m_s"] = float(track.get("speed_m_s", 0.0))
+        obstacle["heading_rad"] = float(track.get("heading_rad", np.nan))
+        obstacle["heading_deg"] = float(track.get("heading_deg", np.nan))
+        obstacle["prediction_model"] = track.get("prediction_model", "ekf_constant_velocity")
+        obstacle["predicted_trajectory_ne"] = prediction_ne.tolist()
+
+    def prune_obstacle_tracks(self, now):
+        self.apf_obstacle_tracks = [
+            track for track in self.apf_obstacle_tracks
+            if now - float(track.get("last_seen_s", track.get("stamp_s", now))) <= self.apf_track_timeout_s
+            and int(track.get("miss_count", 0)) <= 5
+        ]
+
     def update_apf_obstacle_tracks(self, stamp_s):
         now = float(stamp_s if stamp_s is not None else time.time())
         detections = []
 
-        for obstacle in self.lidar_obstacles:
+        for obstacle_index, obstacle in enumerate(self.lidar_obstacles):
             centre_ne = np.asarray(obstacle.get("centre_ne", [np.nan, np.nan]), dtype=float).reshape(2)
             if np.isfinite(centre_ne).all():
-                detections.append(centre_ne)
+                detections.append((obstacle_index, centre_ne))
 
         if not detections:
             for track in self.apf_obstacle_tracks:
-                track["miss_count"] += 1
+                self.predict_obstacle_track_to_time(track, now)
+                track["miss_count"] = int(track.get("miss_count", 0)) + 1
 
-            self.apf_obstacle_tracks = [
-                track for track in self.apf_obstacle_tracks
-                if now - track["stamp_s"] <= self.apf_track_timeout_s
-                and track["miss_count"] <= 5
-            ]
+            self.prune_obstacle_tracks(now)
             return
 
-        detections = np.asarray(detections, dtype=float)
+        detection_positions = np.asarray([detection for _, detection in detections], dtype=float)
+        predicted_tracks = []
         candidates = []
-        for track_index, track in enumerate(self.apf_obstacle_tracks):
-            dt = max(now - track["stamp_s"], 0.0)
-            predicted_pos = track["pos_ne"] + track["vel_ne"] * dt
 
-            for detection_index, detection in enumerate(detections):
+        for track_index, track in enumerate(self.apf_obstacle_tracks):
+            dt = max(now - float(track.get("stamp_s", now)), 0.0)
+            predicted_state, predicted_covariance = self.obstacle_ekf_predict(
+                track.get("state", np.r_[track.get("pos_ne", [np.nan, np.nan]), track.get("vel_ne", [0.0, 0.0])]),
+                track.get("covariance", np.eye(4, dtype=float)),
+                dt,
+            )
+            predicted_tracks.append((predicted_state, predicted_covariance))
+            predicted_pos = predicted_state[0:2]
+
+            for detection_index, detection in enumerate(detection_positions):
                 distance = float(np.linalg.norm(detection - predicted_pos))
                 candidates.append((distance, track_index, detection_index))
 
         candidates.sort(key=lambda item: item[0])
         assigned_tracks = set()
         assigned_detections = set()
+        detection_track = {}
 
         for distance, track_index, detection_index in candidates:
             if distance > self.apf_track_association_m:
@@ -893,48 +1064,89 @@ class LaptopController:
                 continue
 
             track = self.apf_obstacle_tracks[track_index]
-            detection = detections[detection_index]
-            dt = now - track["stamp_s"]
+            detection = detection_positions[detection_index]
+            predicted_state, predicted_covariance = predicted_tracks[track_index]
+            corrected_state, corrected_covariance = self.obstacle_ekf_update(
+                predicted_state,
+                predicted_covariance,
+                detection,
+            )
 
-            if 1e-3 < dt <= self.apf_track_timeout_s:
-                measured_vel = (detection - track["pos_ne"]) / dt
-                if track["hit_count"] <= 1:
-                    track["vel_ne"] = measured_vel
-                else:
-                    track["vel_ne"] = 0.5 * track["vel_ne"] + 0.5 * measured_vel
-            else:
-                track["vel_ne"] = np.zeros(2, dtype=float)
-
-            track["pos_ne"] = detection
+            track["state"] = corrected_state
+            track["covariance"] = corrected_covariance
             track["stamp_s"] = now
-            track["hit_count"] += 1
+            track["last_seen_s"] = now
+            track["hit_count"] = int(track.get("hit_count", 0)) + 1
             track["miss_count"] = 0
+            self.sync_obstacle_track_fields(track)
+            self.append_obstacle_track_history(track)
             assigned_tracks.add(track_index)
             assigned_detections.add(detection_index)
+            detection_track[detection_index] = track
 
         for track_index, track in enumerate(self.apf_obstacle_tracks):
             if track_index not in assigned_tracks:
-                track["miss_count"] += 1
+                predicted_state, predicted_covariance = predicted_tracks[track_index]
+                track["state"] = predicted_state
+                track["covariance"] = predicted_covariance
+                track["stamp_s"] = now
+                track["miss_count"] = int(track.get("miss_count", 0)) + 1
+                self.sync_obstacle_track_fields(track)
 
         for detection_index, detection in enumerate(detections):
             if detection_index in assigned_detections:
                 continue
 
-            self.apf_obstacle_tracks.append({
-                "id": self.apf_next_track_id,
-                "pos_ne": detection,
-                "vel_ne": np.zeros(2, dtype=float),
-                "stamp_s": now,
-                "hit_count": 1,
-                "miss_count": 0,
-            })
-            self.apf_next_track_id += 1
+            _, detection_ne = detection
+            track = self.make_obstacle_track(detection_ne, now)
+            self.apf_obstacle_tracks.append(track)
+            assigned_detections.add(detection_index)
+            detection_track[detection_index] = track
 
-        self.apf_obstacle_tracks = [
-            track for track in self.apf_obstacle_tracks
-            if now - track["stamp_s"] <= self.apf_track_timeout_s
-            and track["miss_count"] <= 5
-        ]
+        for detection_index, track in detection_track.items():
+            obstacle_index, _ = detections[detection_index]
+            self.annotate_lidar_obstacle_with_track(self.lidar_obstacles[obstacle_index], track)
+
+        self.prune_obstacle_tracks(now)
+
+    def obstacle_track_visuals(self):
+        now = float(self.latest_lidar_received_s if self.latest_lidar_received_s is not None else time.time())
+        visuals = []
+
+        for track in self.apf_obstacle_tracks:
+            if now - float(track.get("last_seen_s", track.get("stamp_s", now))) > self.apf_track_timeout_s:
+                continue
+
+            state, _ = self.obstacle_ekf_predict(
+                track.get("state", np.r_[track.get("pos_ne", [np.nan, np.nan]), track.get("vel_ne", [0.0, 0.0])]),
+                track.get("covariance", np.eye(4, dtype=float)),
+                max(now - float(track.get("stamp_s", now)), 0.0),
+            )
+            speed_m_s = float(np.linalg.norm(state[2:4]))
+            heading_rad = float(np.arctan2(state[3], state[2])) if speed_m_s >= 1e-3 else np.nan
+
+            prediction_track = {
+                "state": state,
+            }
+            prediction_ne = self.obstacle_track_prediction_ne(prediction_track)
+            history_ne = np.asarray(track.get("history_ne", []), dtype=float)
+            if history_ne.ndim != 2 or history_ne.shape[1] != 2:
+                history_ne = np.empty((0, 2), dtype=float)
+
+            visuals.append({
+                "id": int(track["id"]),
+                "position_ne": state[0:2].copy(),
+                "velocity_ne": state[2:4].copy(),
+                "speed_m_s": speed_m_s,
+                "heading_rad": heading_rad,
+                "heading_deg": float(np.rad2deg(heading_rad)) if np.isfinite(heading_rad) else np.nan,
+                "prediction_ne": prediction_ne.copy(),
+                "history_ne": history_ne.copy(),
+                "hit_count": int(track.get("hit_count", 0)),
+                "miss_count": int(track.get("miss_count", 0)),
+            })
+
+        return visuals
 
     def apf_track_for_obstacle(self, obstacle):
         centre_ne = np.asarray(obstacle.get("centre_ne", [np.nan, np.nan]), dtype=float).reshape(2)
@@ -946,11 +1158,15 @@ class LaptopController:
         best_distance = np.inf
 
         for track in self.apf_obstacle_tracks:
-            if now - track["stamp_s"] > self.apf_track_timeout_s:
+            if now - float(track.get("last_seen_s", track.get("stamp_s", now))) > self.apf_track_timeout_s:
                 continue
 
-            dt = max(now - track["stamp_s"], 0.0)
-            predicted_pos = track["pos_ne"] + track["vel_ne"] * dt
+            predicted_state, _ = self.obstacle_ekf_predict(
+                track.get("state", np.r_[track.get("pos_ne", [np.nan, np.nan]), track.get("vel_ne", [0.0, 0.0])]),
+                track.get("covariance", np.eye(4, dtype=float)),
+                max(now - float(track.get("stamp_s", now)), 0.0),
+            )
+            predicted_pos = predicted_state[0:2]
             distance = float(np.linalg.norm(centre_ne - predicted_pos))
 
             if distance < best_distance:
@@ -1560,6 +1776,11 @@ class LaptopController:
             )
 
             if final_distance <= self.goal_tolerance_m:
+                self.goal_reached = True
+                if np.isnan(self.s.t_complete):
+                    self.s.t_complete = self.timefromstart
+
+            if self.goal_reached:
                 self.u = Vector(2)
                 self.navigation_mode = "arrived"
                 self.reset_apf_diagnostics()
@@ -1570,22 +1791,30 @@ class LaptopController:
                 self.navigation_mode = "track"
                 self.reset_apf_diagnostics(clear_visual=not self.apf_visual_hold_active())
 
-            self.u[1, 0] = self.limit_heading_deviation_command(self.u[1, 0])
-            self.u[1, 0] = np.clip(self.u[1, 0], -self.w_max, self.w_max)
-            self.u[0, 0] = np.clip(self.u[0, 0], 0.0, self.v_max)
+            if self.goal_reached:
+                self.u[0, 0] = 0.0
+                self.u[1, 0] = 0.0
+            else:
+                self.u[1, 0] = self.limit_heading_deviation_command(self.u[1, 0])
+                self.u[1, 0] = np.clip(self.u[1, 0], -self.w_max, self.w_max)
+                self.u[0, 0] = np.clip(self.u[0, 0], 0.0, self.v_max)
             self.prev_sensed = t
             self.U = self.u.T
 
-            v = self.U[0][0]
-            w = self.U[0][1]
-            F_x = self.robot.k_drag * v * abs(v)
-            tau_z = self.robot.B_66 * w
-            thrust = np.linalg.pinv(self.G) @ l2m([F_x, 0, tau_z])
-            rpm_R = -N2rpm(thrust[0][0])
-            rpm_L = N2rpm(thrust[1][0])
+            v = float(self.U[0][0])
+            w = float(self.U[0][1])
+            if self.goal_reached:
+                self.right_rate = 0.0
+                self.left_rate = 0.0
+            else:
+                F_x = self.robot.k_drag * v * abs(v)
+                tau_z = self.robot.B_66 * w
+                thrust = np.linalg.pinv(self.G) @ l2m([F_x, 0, tau_z])
+                rpm_R = -N2rpm(thrust[0][0])
+                rpm_L = N2rpm(thrust[1][0])
 
-            self.right_rate = float(np.clip(rpm_R * (2 * np.pi / 60), -200, 200))
-            self.left_rate = float(np.clip(rpm_L * (2 * np.pi / 60), -200, 200))
+                self.right_rate = float(np.clip(rpm_R * (2 * np.pi / 60), -200, 200))
+                self.left_rate = float(np.clip(rpm_L * (2 * np.pi / 60), -200, 200))
 
             control_msg = Vector3()
             control_msg.x = int(self.right_rate)
@@ -1604,9 +1833,6 @@ class LaptopController:
                 'F_body=', np.round(self.apf_force_body, 3),
             )
             print('Prop rates: R=',self.right_rate,', L=',self.left_rate,'rad/s')
-
-            if final_distance <= self.goal_tolerance_m and np.isnan(self.s.t_complete):
-                self.s.t_complete = self.timefromstart
             
         nearest_obstacle_north = np.nan
         nearest_obstacle_east = np.nan

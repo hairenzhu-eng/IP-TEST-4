@@ -13,6 +13,7 @@ import argparse
 import numpy as np
 from drivers.rpi import Rate
 
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import QWidget, QApplication, QGridLayout
 from pglive.sources.data_connector import DataConnector
 from pglive.sources.live_plot import LiveLinePlot
@@ -21,6 +22,7 @@ from pglive.sources.live_plot_widget import LivePlotWidget
 import laptop as lt
 
 class ShowLaptop(QWidget):
+    obstacle_summary_signal = pyqtSignal(str)
     running = False
 
     def __init__(self, parent=None):
@@ -43,6 +45,7 @@ class ShowLaptop(QWidget):
         layout.addWidget(self.depthplot, 2, 3, 1, 2)
         self.loopcounter = 0
         self.Laptop = lt.LaptopController(OPERATING_MODE)
+        self.obstacle_summary_signal.connect(self._set_obstacle_summary_title)
         
         # Create one curve pre dataset
         thruster1plot = LiveLinePlot(pen="blue", name = 'Thruster 1')
@@ -61,6 +64,10 @@ class ShowLaptop(QWidget):
         apfRepulsivePlot = LiveLinePlot(pen = 'magenta', name = 'APF Repulsive Force')
         apfSteeringPlot = LiveLinePlot(pen = 'cyan', name = 'APF Steering Force')
         apfTargetPlot = LiveScatterPlot(symbol = 't', size = 10, pen = 'orange', name = 'APF Target')
+        obstacleEkfPositionPlot = LiveScatterPlot(symbol = 'o', size = 8, pen = 'orange', name = 'Obstacle EKF Position')
+        obstacleEkfHistoryPlot = LiveLinePlot(pen = 'green', name = 'Obstacle EKF Track')
+        obstacleEkfPredictionPlot = LiveLinePlot(pen = 'orange', name = 'Obstacle EKF Prediction')
+        obstacleEkfDirectionPlot = LiveLinePlot(pen = 'red', name = 'Obstacle Direction')
         
         dtplot = LiveLinePlot(pen='blue', name = 'Laptop Update')
         Idtplot = LiveScatterPlot(symbol = 'x', pen = 'red', name = 'IMU Update')
@@ -85,6 +92,10 @@ class ShowLaptop(QWidget):
         self.apf_repulsive = DataConnector(apfRepulsivePlot, max_points=2)
         self.apf_steering = DataConnector(apfSteeringPlot, max_points=2)
         self.apf_target = DataConnector(apfTargetPlot, max_points=1)
+        self.obstacle_ekf_position = DataConnector(obstacleEkfPositionPlot, max_points=50)
+        self.obstacle_ekf_history = DataConnector(obstacleEkfHistoryPlot, max_points=3000)
+        self.obstacle_ekf_prediction = DataConnector(obstacleEkfPredictionPlot, max_points=1000)
+        self.obstacle_ekf_direction = DataConnector(obstacleEkfDirectionPlot, max_points=200)
         
         self.dtplot = DataConnector(dtplot, max_points=1500)
         self.Idtplot = DataConnector(Idtplot, max_points=1500)
@@ -133,6 +144,10 @@ class ShowLaptop(QWidget):
         self.positionplot.addItem(apfRepulsivePlot)
         self.positionplot.addItem(apfSteeringPlot)
         self.positionplot.addItem(apfTargetPlot)
+        self.positionplot.addItem(obstacleEkfPositionPlot)
+        self.positionplot.addItem(obstacleEkfHistoryPlot)
+        self.positionplot.addItem(obstacleEkfPredictionPlot)
+        self.positionplot.addItem(obstacleEkfDirectionPlot)
         self.timeplot.addItem(dtplot)
         self.timeplot.addItem(Idtplot)
         self.timeplot.addItem(Adtplot)
@@ -150,6 +165,9 @@ class ShowLaptop(QWidget):
         self._map_y = []
         self._map_x_store = []
         self._map_y_store = []
+
+    def _set_obstacle_summary_title(self, summary):
+        self.positionplot.setTitle(summary)
         
         
     def _force_line_ne(self, force_body, scale=0.8):
@@ -197,7 +215,63 @@ class ShowLaptop(QWidget):
         else:
             self.apf_target.cb_set_data([], [])
 
-        
+    def _append_track_segments(self, northings, eastings, points_ne):
+        points_ne = np.asarray(points_ne, dtype=float)
+        if points_ne.ndim != 2 or points_ne.shape[0] < 2 or points_ne.shape[1] < 2:
+            return
+
+        finite = np.isfinite(points_ne[:, 0]) & np.isfinite(points_ne[:, 1])
+        points_ne = points_ne[finite]
+        if len(points_ne) < 2:
+            return
+
+        northings.extend(points_ne[:, 0].tolist())
+        eastings.extend(points_ne[:, 1].tolist())
+        northings.append(np.nan)
+        eastings.append(np.nan)
+
+    def _update_obstacle_tracks_plot(self):
+        tracks = self.Laptop.obstacle_track_visuals()
+        position_northings = []
+        position_eastings = []
+        history_northings = []
+        history_eastings = []
+        prediction_northings = []
+        prediction_eastings = []
+        direction_northings = []
+        direction_eastings = []
+        summaries = []
+
+        for track in tracks:
+            position_ne = np.asarray(track.get("position_ne", [np.nan, np.nan]), dtype=float).reshape(2)
+            velocity_ne = np.asarray(track.get("velocity_ne", [0.0, 0.0]), dtype=float).reshape(2)
+
+            if not np.isfinite(position_ne).all():
+                continue
+
+            position_northings.append(position_ne[0])
+            position_eastings.append(position_ne[1])
+            self._append_track_segments(history_northings, history_eastings, track.get("history_ne", []))
+            self._append_track_segments(prediction_northings, prediction_eastings, track.get("prediction_ne", []))
+
+            heading_deg = float(track.get("heading_deg", np.nan))
+            if np.isfinite(heading_deg):
+                summaries.append(f"#{int(track.get('id', 0))} {heading_deg:.0f}deg")
+
+            speed_m_s = float(track.get("speed_m_s", np.linalg.norm(velocity_ne)))
+            if np.isfinite(speed_m_s) and speed_m_s >= 1e-3 and np.isfinite(velocity_ne).all():
+                vector_len_m = 0.45
+                direction_ne = velocity_ne / max(float(np.linalg.norm(velocity_ne)), 1e-6)
+                end_ne = position_ne + direction_ne * vector_len_m
+                direction_northings.extend([position_ne[0], end_ne[0], np.nan])
+                direction_eastings.extend([position_ne[1], end_ne[1], np.nan])
+
+        self.obstacle_ekf_position.cb_set_data(position_northings, position_eastings)
+        self.obstacle_ekf_history.cb_set_data(history_northings, history_eastings)
+        self.obstacle_ekf_prediction.cb_set_data(prediction_northings, prediction_eastings)
+        self.obstacle_ekf_direction.cb_set_data(direction_northings, direction_eastings)
+        self.obstacle_summary_signal.emit("Obstacle EKF: " + " | ".join(summaries[:3]) if summaries else "")
+
     def _update_lidar_plot(self, lidar_cloud_ne):
         lidar_timestamp_s = getattr(self.Laptop, "latest_lidar_received_s", None)
         if lidar_cloud_ne is None or lidar_timestamp_s == self._lidar_timestamp_s_prev:
@@ -278,6 +352,7 @@ class ShowLaptop(QWidget):
                 self.ASP.cb_append_data_point(sensed_pos_northings_m, sensed_pos_eastings_m)
             self._update_lidar_plot(lidar_cloud_ne)
             self._update_apf_plot()
+            self._update_obstacle_tracks_plot()
             
             if lastdt != None:
                 self.dtplot.cb_append_data_point(lastdt, self.TFS)
