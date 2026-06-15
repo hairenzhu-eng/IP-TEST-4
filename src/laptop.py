@@ -270,7 +270,7 @@ class LaptopController:
         self.heading_deviation_guard_rad = np.deg2rad(55.0)
         self.heading_deviation_return_gain = 3.0
 
-        # ---------------- Paper-style modified APF parameters ----------------
+        # ----------------  APF parameters ----------------
         self.apf_static_influence_m = 5.0 if self.OPERATING_MODE == 2 else 5.5
         self.apf_dynamic_influence_max_m = 5.0 if self.OPERATING_MODE == 2 else 6.5
         self.apf_activation_front_half_angle_rad = np.deg2rad(150.0)
@@ -283,12 +283,12 @@ class LaptopController:
         self.apf_attraction_saturation_m = 3.5
         self.apf_path_threshold_m = 0.10
         self.apf_route_lookahead_m = 2.1 if self.OPERATING_MODE == 2 else 1.8
-        self.apf_clearance_offset_m = 1.4
-        self.apf_clearance_gain = 2.0
+        self.apf_clearance_offset_m = 2.0
+        self.apf_clearance_gain = 2.3
         self.apf_collision_horizon_s = 6.0 if self.OPERATING_MODE != 2 else 10.0
         self.apf_prediction_dt_s = 0.5
-        self.apf_safety_domain_m = 1.0 if self.OPERATING_MODE == 2 else 1.0
-        self.apf_too_close_m = 0.8 if self.OPERATING_MODE == 2 else 0.6
+        self.apf_safety_domain_m = 1.4 if self.OPERATING_MODE == 2 else 1.2
+        self.apf_too_close_m = 1.0 if self.OPERATING_MODE == 2 else 0.8
         self.apf_heading_gain = 0.9
         self.apf_heading_step_limit_rad = np.deg2rad(60.0)
         self.apf_min_forward_speed = 0.06
@@ -308,6 +308,7 @@ class LaptopController:
         self.apf_track_timeout_s = 1.5 if self.OPERATING_MODE == 2 else 1.0
         self.apf_next_track_id = 1
         self.apf_obstacle_tracks = []
+        self.apf_virtual_obstacles = []
         self.obstacle_ekf_measurement_std_m = 0.08 if self.OPERATING_MODE == 2 else 0.12
         self.obstacle_ekf_accel_std_m_s2 = 0.20 if self.OPERATING_MODE == 2 else 0.35
         self.obstacle_ekf_initial_position_std_m = 0.20
@@ -315,6 +316,12 @@ class LaptopController:
         self.obstacle_prediction_horizon_s = 5.0 if self.OPERATING_MODE == 2 else 4.0
         self.obstacle_prediction_step_s = 0.5
         self.obstacle_history_len = 60
+        self.obstacle_stats_window_s = 2.5
+        self.obstacle_min_equivalent_radius_m = 0.18 if self.OPERATING_MODE == 2 else 0.15
+        self.obstacle_max_accel_m_s2 = 0.80 if self.OPERATING_MODE == 2 else 0.60
+        self.apf_own_equivalent_radius_m = 0.30 if self.OPERATING_MODE == 2 else 0.25
+        self.apf_virtual_influence_scale = 3.0
+        self.apf_virtual_repulsive_gain = 0.12
         self.apf_side_lock_sign = 0.0
         self.apf_side_lock_until_s = 0.0
         self.apf_side_lock_s = 5.0 if self.OPERATING_MODE != 2 else 8.0
@@ -678,6 +685,15 @@ class LaptopController:
 
             cluster_points = self.lidar_points_body[labels == label]
             centre_body = np.mean(cluster_points, axis=0)
+            relative_points = cluster_points - centre_body
+            cluster_radius_m = float(np.max(np.linalg.norm(relative_points, axis=1)))
+            cluster_extent_xy_m = np.ptp(cluster_points, axis=0)
+            cluster_size_m = float(np.linalg.norm(cluster_extent_xy_m))
+            equivalent_radius_m = max(
+                self.obstacle_min_equivalent_radius_m,
+                cluster_radius_m,
+                0.5 * cluster_size_m,
+            )
             centre_ne = self.body_point_to_earth(centre_body)
             centre_distance_m = float(np.linalg.norm(centre_body))
             centre_angle_rad = float(np.arctan2(centre_body[1], centre_body[0]))
@@ -692,6 +708,9 @@ class LaptopController:
                 "angle_rad": centre_angle_rad,
                 "angle_deg": float(np.rad2deg(centre_angle_rad)),
                 "min_distance_m": min_distance_m,
+                "cluster_radius_m": cluster_radius_m,
+                "cluster_size_m": cluster_size_m,
+                "equivalent_radius_m": equivalent_radius_m,
             })
 
         obstacles.sort(key=lambda obstacle: obstacle["distance_m"])
@@ -812,6 +831,7 @@ class LaptopController:
             self.apf_attractive_force_body = np.zeros(2, dtype=float)
             self.apf_steering_force_body = np.zeros(2, dtype=float)
             self.apf_target_ne = np.array([np.nan, np.nan], dtype=float)
+            self.apf_virtual_obstacles = []
             self.apf_visual_hold_until_s = 0.0
 
         self.apf_encounter_mode = "none"
@@ -928,14 +948,22 @@ class LaptopController:
         if not np.isfinite(state).all():
             return np.empty((0, 2), dtype=float)
 
+        velocity_ne = np.asarray(track.get("velocity_mean_ne", state[2:4]), dtype=float).reshape(2)
+        if not np.isfinite(velocity_ne).all():
+            velocity_ne = state[2:4]
+
+        accel_ne = np.asarray(track.get("accel_ne", [0.0, 0.0]), dtype=float).reshape(2)
+        if int(track.get("stats_sample_count", 0)) < 3 or not np.isfinite(accel_ne).all():
+            accel_ne = np.zeros(2, dtype=float)
+
         step_s = max(float(self.obstacle_prediction_step_s), 1e-3)
         horizon_s = max(float(self.obstacle_prediction_horizon_s), step_s)
         times = np.arange(0.0, horizon_s + 0.5 * step_s, step_s, dtype=float)
 
         return np.column_stack(
             [
-                state[0] + state[2] * times,
-                state[1] + state[3] * times,
+                state[0] + velocity_ne[0] * times + 0.5 * accel_ne[0] * times * times,
+                state[1] + velocity_ne[1] * times + 0.5 * accel_ne[1] * times * times,
             ]
         )
 
@@ -944,21 +972,36 @@ class LaptopController:
         track["pos_ne"] = state[0:2].copy()
         track["vel_ne"] = state[2:4].copy()
 
-        speed_m_s = float(np.linalg.norm(track["vel_ne"]))
+        radius_m = float(track.get("radius_m", track.get("equivalent_radius_m", self.obstacle_min_equivalent_radius_m)))
+        if not np.isfinite(radius_m) or radius_m <= 0.0:
+            radius_m = self.obstacle_min_equivalent_radius_m
+        track["radius_m"] = max(radius_m, self.obstacle_min_equivalent_radius_m)
+        track["equivalent_radius_m"] = track["radius_m"]
+
+        display_velocity_ne = np.asarray(track.get("velocity_mean_ne", track["vel_ne"]), dtype=float).reshape(2)
+        if not np.isfinite(display_velocity_ne).all():
+            display_velocity_ne = track["vel_ne"]
+
+        speed_m_s = float(np.linalg.norm(display_velocity_ne))
         track["speed_m_s"] = speed_m_s
         if speed_m_s >= 1e-3:
-            heading_rad = float(np.arctan2(track["vel_ne"][1], track["vel_ne"][0]))
+            heading_rad = float(np.arctan2(display_velocity_ne[1], display_velocity_ne[0]))
             track["heading_rad"] = heading_rad
             track["heading_deg"] = float(np.rad2deg(heading_rad))
         else:
             track["heading_rad"] = np.nan
             track["heading_deg"] = np.nan
 
-        track["prediction_model"] = "ekf_constant_velocity"
+        if int(track.get("stats_sample_count", 0)) >= 3:
+            track["prediction_model"] = "sliding_window_acceleration"
+        else:
+            track["prediction_model"] = "ekf_constant_velocity"
         track["prediction_ne"] = self.obstacle_track_prediction_ne(track)
 
-    def make_obstacle_track(self, detection_ne, stamp_s):
+    def make_obstacle_track(self, detection_ne, stamp_s, radius_m=np.nan):
         detection_ne = np.asarray(detection_ne, dtype=float).reshape(2)
+        radius_m = float(radius_m) if np.isfinite(radius_m) and radius_m > 0.0 else self.obstacle_min_equivalent_radius_m
+        radius_m = max(radius_m, self.obstacle_min_equivalent_radius_m)
         covariance = np.diag(
             [
                 self.obstacle_ekf_initial_position_std_m ** 2,
@@ -975,9 +1018,13 @@ class LaptopController:
             "last_seen_s": float(stamp_s),
             "hit_count": 1,
             "miss_count": 0,
-            "history_ne": [detection_ne.copy()],
+            "history_ne": [],
+            "motion_window": [],
+            "radius_m": radius_m,
+            "equivalent_radius_m": radius_m,
         }
         self.sync_obstacle_track_fields(track)
+        self.append_obstacle_track_history(track, radius_m=radius_m, stamp_s=stamp_s)
         self.apf_next_track_id += 1
         return track
 
@@ -994,19 +1041,156 @@ class LaptopController:
         track["stamp_s"] = now
         self.sync_obstacle_track_fields(track)
 
-    def append_obstacle_track_history(self, track):
+    def append_obstacle_track_history(self, track, radius_m=np.nan, stamp_s=None):
+        stamp_s = float(stamp_s if stamp_s is not None else track.get("stamp_s", time.time()))
+        pos_ne = np.asarray(track["pos_ne"], dtype=float).reshape(2).copy()
+        vel_ne = np.asarray(track.get("vel_ne", [0.0, 0.0]), dtype=float).reshape(2).copy()
+        if not np.isfinite(vel_ne).all():
+            vel_ne = np.zeros(2, dtype=float)
+
+        if not np.isfinite(radius_m) or float(radius_m) <= 0.0:
+            radius_m = track.get("radius_m", self.obstacle_min_equivalent_radius_m)
+        radius_m = max(float(radius_m), self.obstacle_min_equivalent_radius_m)
+
         history = track.setdefault("history_ne", [])
-        history.append(np.asarray(track["pos_ne"], dtype=float).reshape(2).copy())
+        history.append(pos_ne)
         if len(history) > self.obstacle_history_len:
             del history[:-self.obstacle_history_len]
+
+        speed_m_s = float(np.linalg.norm(vel_ne))
+        heading_rad = float(np.arctan2(vel_ne[1], vel_ne[0])) if speed_m_s >= self.apf_dynamic_speed_threshold_m_s else np.nan
+        motion_window = track.setdefault("motion_window", [])
+        motion_window.append({
+            "stamp_s": stamp_s,
+            "pos_ne": pos_ne,
+            "vel_ne": vel_ne,
+            "speed_m_s": speed_m_s,
+            "heading_rad": heading_rad,
+            "radius_m": radius_m,
+        })
+
+        cutoff_s = stamp_s - max(float(self.obstacle_stats_window_s), 0.0)
+        track["motion_window"] = [
+            sample for sample in motion_window
+            if float(sample.get("stamp_s", stamp_s)) >= cutoff_s
+        ][-self.obstacle_history_len:]
+        self.update_obstacle_track_statistics(track)
+
+    def update_obstacle_track_statistics(self, track):
+        samples = track.get("motion_window", [])
+        samples = [
+            sample for sample in samples
+            if np.isfinite(np.asarray(sample.get("pos_ne", [np.nan, np.nan]), dtype=float)).all()
+        ]
+        track["stats_sample_count"] = int(len(samples))
+
+        if not samples:
+            track["velocity_mean_ne"] = np.asarray(track.get("vel_ne", [0.0, 0.0]), dtype=float).reshape(2)
+            track["velocity_var_ne"] = np.zeros(2, dtype=float)
+            track["speed_mean_m_s"] = float(np.linalg.norm(track["velocity_mean_ne"]))
+            track["speed_var_m2_s2"] = 0.0
+            track["heading_mean_rad"] = np.nan
+            track["heading_var_rad2"] = np.nan
+            track["heading_circular_variance"] = np.nan
+            track["radius_mean_m"] = track.get("radius_m", self.obstacle_min_equivalent_radius_m)
+            track["radius_var_m2"] = 0.0
+            track["accel_ne"] = np.zeros(2, dtype=float)
+            track["accel_var_ne"] = np.zeros(2, dtype=float)
+            self.sync_obstacle_track_fields(track)
+            return
+
+        velocities = np.asarray([sample["vel_ne"] for sample in samples], dtype=float)
+        finite_vel = np.isfinite(velocities).all(axis=1)
+        velocities = velocities[finite_vel]
+        if len(velocities) > 0:
+            track["velocity_mean_ne"] = np.mean(velocities, axis=0)
+            track["velocity_var_ne"] = np.var(velocities, axis=0)
+        else:
+            track["velocity_mean_ne"] = np.asarray(track.get("vel_ne", [0.0, 0.0]), dtype=float).reshape(2)
+            track["velocity_var_ne"] = np.zeros(2, dtype=float)
+
+        speeds = np.asarray([sample["speed_m_s"] for sample in samples], dtype=float)
+        speeds = speeds[np.isfinite(speeds)]
+        if len(speeds) > 0:
+            track["speed_mean_m_s"] = float(np.mean(speeds))
+            track["speed_var_m2_s2"] = float(np.var(speeds))
+        else:
+            track["speed_mean_m_s"] = float(np.linalg.norm(track["velocity_mean_ne"]))
+            track["speed_var_m2_s2"] = 0.0
+
+        headings = np.asarray([sample["heading_rad"] for sample in samples], dtype=float)
+        headings = headings[np.isfinite(headings)]
+        if len(headings) > 0:
+            sin_mean = float(np.mean(np.sin(headings)))
+            cos_mean = float(np.mean(np.cos(headings)))
+            heading_mean = float(np.arctan2(sin_mean, cos_mean))
+            heading_error = wrap_angle(headings - heading_mean)
+            resultant_length = float(np.hypot(sin_mean, cos_mean))
+            track["heading_mean_rad"] = heading_mean
+            track["heading_var_rad2"] = float(np.var(heading_error))
+            track["heading_circular_variance"] = float(1.0 - np.clip(resultant_length, 0.0, 1.0))
+        else:
+            track["heading_mean_rad"] = np.nan
+            track["heading_var_rad2"] = np.nan
+            track["heading_circular_variance"] = np.nan
+
+        radii = np.asarray([sample["radius_m"] for sample in samples], dtype=float)
+        radii = radii[np.isfinite(radii) & (radii > 0.0)]
+        if len(radii) > 0:
+            radius_mean = max(float(np.mean(radii)), self.obstacle_min_equivalent_radius_m)
+            track["radius_mean_m"] = radius_mean
+            track["radius_var_m2"] = float(np.var(radii))
+            track["radius_m"] = radius_mean
+            track["equivalent_radius_m"] = radius_mean
+        else:
+            track["radius_mean_m"] = track.get("radius_m", self.obstacle_min_equivalent_radius_m)
+            track["radius_var_m2"] = 0.0
+
+        velocity_samples = [
+            sample for sample in samples
+            if np.isfinite(np.asarray(sample.get("vel_ne", [np.nan, np.nan]), dtype=float)).all()
+        ]
+        velocity_samples.sort(key=lambda sample: float(sample.get("stamp_s", 0.0)))
+        accels = []
+        for prev_sample, next_sample in zip(velocity_samples[:-1], velocity_samples[1:]):
+            dt = float(next_sample.get("stamp_s", 0.0)) - float(prev_sample.get("stamp_s", 0.0))
+            if dt <= 1e-3:
+                continue
+            prev_vel = np.asarray(prev_sample["vel_ne"], dtype=float).reshape(2)
+            next_vel = np.asarray(next_sample["vel_ne"], dtype=float).reshape(2)
+            accels.append((next_vel - prev_vel) / dt)
+
+        if accels:
+            accel_ne = np.mean(np.asarray(accels, dtype=float), axis=0)
+            accel_norm = float(np.linalg.norm(accel_ne))
+            if accel_norm > self.obstacle_max_accel_m_s2:
+                accel_ne *= self.obstacle_max_accel_m_s2 / max(accel_norm, 1e-6)
+            track["accel_ne"] = accel_ne
+            track["accel_var_ne"] = np.var(np.asarray(accels, dtype=float), axis=0)
+        else:
+            track["accel_ne"] = np.zeros(2, dtype=float)
+            track["accel_var_ne"] = np.zeros(2, dtype=float)
+
+        self.sync_obstacle_track_fields(track)
 
     def annotate_lidar_obstacle_with_track(self, obstacle, track):
         prediction_ne = np.asarray(track.get("prediction_ne", np.empty((0, 2))), dtype=float)
         obstacle["track_id"] = int(track["id"])
         obstacle["velocity_ne"] = np.asarray(track["vel_ne"], dtype=float).reshape(2).tolist()
+        obstacle["velocity_mean_ne"] = np.asarray(track.get("velocity_mean_ne", track["vel_ne"]), dtype=float).reshape(2).tolist()
+        obstacle["velocity_var_ne"] = np.asarray(track.get("velocity_var_ne", [0.0, 0.0]), dtype=float).reshape(2).tolist()
+        obstacle["accel_ne"] = np.asarray(track.get("accel_ne", [0.0, 0.0]), dtype=float).reshape(2).tolist()
         obstacle["speed_m_s"] = float(track.get("speed_m_s", 0.0))
+        obstacle["speed_mean_m_s"] = float(track.get("speed_mean_m_s", obstacle["speed_m_s"]))
+        obstacle["speed_var_m2_s2"] = float(track.get("speed_var_m2_s2", 0.0))
         obstacle["heading_rad"] = float(track.get("heading_rad", np.nan))
         obstacle["heading_deg"] = float(track.get("heading_deg", np.nan))
+        obstacle["heading_mean_rad"] = float(track.get("heading_mean_rad", np.nan))
+        obstacle["heading_var_rad2"] = float(track.get("heading_var_rad2", np.nan))
+        obstacle["radius_mean_m"] = float(track.get("radius_mean_m", track.get("radius_m", self.obstacle_min_equivalent_radius_m)))
+        obstacle["radius_var_m2"] = float(track.get("radius_var_m2", 0.0))
+        obstacle["equivalent_radius_m"] = float(track.get("equivalent_radius_m", self.obstacle_min_equivalent_radius_m))
+        obstacle["stats_sample_count"] = int(track.get("stats_sample_count", 0))
         obstacle["prediction_model"] = track.get("prediction_model", "ekf_constant_velocity")
         obstacle["predicted_trajectory_ne"] = prediction_ne.tolist()
 
@@ -1024,7 +1208,10 @@ class LaptopController:
         for obstacle_index, obstacle in enumerate(self.lidar_obstacles):
             centre_ne = np.asarray(obstacle.get("centre_ne", [np.nan, np.nan]), dtype=float).reshape(2)
             if np.isfinite(centre_ne).all():
-                detections.append((obstacle_index, centre_ne))
+                radius_m = float(obstacle.get("equivalent_radius_m", self.obstacle_min_equivalent_radius_m))
+                if not np.isfinite(radius_m) or radius_m <= 0.0:
+                    radius_m = self.obstacle_min_equivalent_radius_m
+                detections.append((obstacle_index, centre_ne, radius_m))
 
         if not detections:
             for track in self.apf_obstacle_tracks:
@@ -1034,7 +1221,8 @@ class LaptopController:
             self.prune_obstacle_tracks(now)
             return
 
-        detection_positions = np.asarray([detection for _, detection in detections], dtype=float)
+        detection_positions = np.asarray([detection for _, detection, _ in detections], dtype=float)
+        detection_radii = np.asarray([radius for _, _, radius in detections], dtype=float)
         predicted_tracks = []
         candidates = []
 
@@ -1079,7 +1267,11 @@ class LaptopController:
             track["hit_count"] = int(track.get("hit_count", 0)) + 1
             track["miss_count"] = 0
             self.sync_obstacle_track_fields(track)
-            self.append_obstacle_track_history(track)
+            self.append_obstacle_track_history(
+                track,
+                radius_m=detection_radii[detection_index],
+                stamp_s=now,
+            )
             assigned_tracks.add(track_index)
             assigned_detections.add(detection_index)
             detection_track[detection_index] = track
@@ -1097,14 +1289,14 @@ class LaptopController:
             if detection_index in assigned_detections:
                 continue
 
-            _, detection_ne = detection
-            track = self.make_obstacle_track(detection_ne, now)
+            _, detection_ne, radius_m = detection
+            track = self.make_obstacle_track(detection_ne, now, radius_m=radius_m)
             self.apf_obstacle_tracks.append(track)
             assigned_detections.add(detection_index)
             detection_track[detection_index] = track
 
         for detection_index, track in detection_track.items():
-            obstacle_index, _ = detections[detection_index]
+            obstacle_index, _, _ = detections[detection_index]
             self.annotate_lidar_obstacle_with_track(self.lidar_obstacles[obstacle_index], track)
 
         self.prune_obstacle_tracks(now)
@@ -1122,11 +1314,17 @@ class LaptopController:
                 track.get("covariance", np.eye(4, dtype=float)),
                 max(now - float(track.get("stamp_s", now)), 0.0),
             )
-            speed_m_s = float(np.linalg.norm(state[2:4]))
-            heading_rad = float(np.arctan2(state[3], state[2])) if speed_m_s >= 1e-3 else np.nan
+            velocity_ne = np.asarray(track.get("velocity_mean_ne", state[2:4]), dtype=float).reshape(2)
+            if not np.isfinite(velocity_ne).all():
+                velocity_ne = state[2:4]
+            speed_m_s = float(np.linalg.norm(velocity_ne))
+            heading_rad = float(np.arctan2(velocity_ne[1], velocity_ne[0])) if speed_m_s >= 1e-3 else np.nan
 
             prediction_track = {
                 "state": state,
+                "velocity_mean_ne": velocity_ne,
+                "accel_ne": track.get("accel_ne", [0.0, 0.0]),
+                "stats_sample_count": int(track.get("stats_sample_count", 0)),
             }
             prediction_ne = self.obstacle_track_prediction_ne(prediction_track)
             history_ne = np.asarray(track.get("history_ne", []), dtype=float)
@@ -1136,12 +1334,19 @@ class LaptopController:
             visuals.append({
                 "id": int(track["id"]),
                 "position_ne": state[0:2].copy(),
-                "velocity_ne": state[2:4].copy(),
+                "velocity_ne": velocity_ne.copy(),
                 "speed_m_s": speed_m_s,
                 "heading_rad": heading_rad,
                 "heading_deg": float(np.rad2deg(heading_rad)) if np.isfinite(heading_rad) else np.nan,
                 "prediction_ne": prediction_ne.copy(),
                 "history_ne": history_ne.copy(),
+                "accel_ne": np.asarray(track.get("accel_ne", [0.0, 0.0]), dtype=float).reshape(2).copy(),
+                "speed_var_m2_s2": float(track.get("speed_var_m2_s2", 0.0)),
+                "heading_var_rad2": float(track.get("heading_var_rad2", np.nan)),
+                "radius_mean_m": float(track.get("radius_mean_m", track.get("radius_m", self.obstacle_min_equivalent_radius_m))),
+                "radius_var_m2": float(track.get("radius_var_m2", 0.0)),
+                "prediction_model": track.get("prediction_model", "ekf_constant_velocity"),
+                "stats_sample_count": int(track.get("stats_sample_count", 0)),
                 "hit_count": int(track.get("hit_count", 0)),
                 "miss_count": int(track.get("miss_count", 0)),
             })
@@ -1189,6 +1394,138 @@ class LaptopController:
         tcpa = max(-float(np.dot(obs_pos_body, rel_vel)) / rel_speed_sq, 0.0)
         dcpa = float(np.linalg.norm(obs_pos_body + rel_vel * tcpa))
         return tcpa, dcpa
+
+    def own_prediction_velocity_ne(self):
+        own_vel_ne = np.asarray(self.v_robot[0:2], dtype=float).reshape(2)
+        if np.isfinite(own_vel_ne).all() and float(np.linalg.norm(own_vel_ne)) >= self.apf_dynamic_speed_threshold_m_s:
+            return own_vel_ne
+
+        return self.route_path_unit_ne * max(float(self.route_tracking_speed_m_s), self.apf_min_forward_speed)
+
+    def obstacle_track_state_at(self, track, dt_s):
+        dt_s = max(float(dt_s), 0.0)
+        state = np.asarray(track.get("state", [np.nan, np.nan, 0.0, 0.0]), dtype=float).reshape(4)
+        if not np.isfinite(state).all():
+            return None, None
+
+        if int(track.get("stats_sample_count", 0)) >= 2:
+            velocity_ne = np.asarray(track.get("velocity_mean_ne", state[2:4]), dtype=float).reshape(2)
+        else:
+            velocity_ne = state[2:4].copy()
+
+        if not np.isfinite(velocity_ne).all():
+            velocity_ne = state[2:4].copy()
+
+        if int(track.get("stats_sample_count", 0)) >= 3:
+            accel_ne = np.asarray(track.get("accel_ne", [0.0, 0.0]), dtype=float).reshape(2)
+        else:
+            accel_ne = np.zeros(2, dtype=float)
+
+        if not np.isfinite(accel_ne).all():
+            accel_ne = np.zeros(2, dtype=float)
+
+        pos_ne = state[0:2] + velocity_ne * dt_s + 0.5 * accel_ne * dt_s * dt_s
+        vel_ne = velocity_ne + accel_ne * dt_s
+        return pos_ne, vel_ne
+
+    def update_apf_virtual_obstacles(self):
+        self.apf_virtual_obstacles = []
+        now = float(self.latest_lidar_received_s if self.latest_lidar_received_s is not None else time.time())
+        own_pos_ne = np.array([float(self.North), float(self.East)], dtype=float)
+        own_vel_ne = self.own_prediction_velocity_ne()
+
+        if not np.isfinite(own_pos_ne).all() or not np.isfinite(own_vel_ne).all():
+            return self.apf_virtual_obstacles
+
+        step_s = max(float(self.apf_prediction_dt_s), 1e-3)
+        horizon_s = max(float(self.apf_collision_horizon_s), step_s)
+        times = np.arange(step_s, horizon_s + 0.5 * step_s, step_s, dtype=float)
+
+        for track in self.apf_obstacle_tracks:
+            if now - float(track.get("last_seen_s", track.get("stamp_s", now))) > self.apf_track_timeout_s:
+                continue
+            if int(track.get("hit_count", 0)) < 2:
+                continue
+
+            speed_m_s = float(track.get("speed_mean_m_s", track.get("speed_m_s", 0.0)))
+            if speed_m_s < self.apf_dynamic_speed_threshold_m_s:
+                continue
+
+            radius_m = float(track.get("radius_mean_m", track.get("radius_m", self.obstacle_min_equivalent_radius_m)))
+            if not np.isfinite(radius_m) or radius_m <= 0.0:
+                radius_m = self.obstacle_min_equivalent_radius_m
+            radius_m = max(radius_m, self.obstacle_min_equivalent_radius_m)
+
+            obs_positions = []
+            obs_velocities = []
+            own_positions = []
+            usable_times = []
+            for dt_s in times:
+                obs_pos_ne, obs_vel_ne = self.obstacle_track_state_at(track, dt_s)
+                if obs_pos_ne is None:
+                    continue
+                obs_positions.append(obs_pos_ne)
+                obs_velocities.append(obs_vel_ne)
+                own_positions.append(own_pos_ne + own_vel_ne * dt_s)
+                usable_times.append(dt_s)
+
+            if not obs_positions:
+                continue
+
+            obs_positions = np.asarray(obs_positions, dtype=float)
+            obs_velocities = np.asarray(obs_velocities, dtype=float)
+            own_positions = np.asarray(own_positions, dtype=float)
+            usable_times = np.asarray(usable_times, dtype=float)
+            separations = np.linalg.norm(obs_positions - own_positions, axis=1)
+
+            radius_std_m = float(np.sqrt(max(float(track.get("radius_var_m2", 0.0)), 0.0)))
+            speed_std_m_s = float(np.sqrt(max(float(track.get("speed_var_m2_s2", 0.0)), 0.0)))
+            heading_var = float(track.get("heading_var_rad2", 0.0))
+            heading_std_rad = float(np.sqrt(max(heading_var, 0.0))) if np.isfinite(heading_var) else 0.0
+
+            uncertainty_m = (
+                radius_std_m
+                + speed_std_m_s * usable_times
+                + speed_m_s * heading_std_rad * usable_times
+            )
+            influence_radius_m = max(self.apf_virtual_influence_scale * radius_m, 1e-3)
+            uncertainty_m = np.minimum(uncertainty_m, influence_radius_m)
+            collision_margin_m = self.apf_own_equivalent_radius_m + radius_m + uncertainty_m
+            risk_indices = np.flatnonzero(separations <= collision_margin_m)
+            if len(risk_indices) == 0:
+                continue
+
+            risk_index = int(risk_indices[0])
+            collision_ne = 0.5 * (obs_positions[risk_index] + own_positions[risk_index])
+            centre_body = self.earth_point_to_body(collision_ne)
+            if not np.isfinite(centre_body).all():
+                continue
+
+            angle_rad = abs(wrap_angle(float(np.arctan2(centre_body[1], centre_body[0]))))
+            if angle_rad > self.apf_activation_front_half_angle_rad:
+                continue
+
+            distance_m = max(float(np.linalg.norm(centre_body)), 1e-3)
+            self.apf_virtual_obstacles.append({
+                "label": -1000 - int(track.get("id", 0)),
+                "virtual": True,
+                "virtual_type": "dynamic_collision_point",
+                "track_id": int(track.get("id", 0)),
+                "centre_body": centre_body.tolist(),
+                "centre_ne": collision_ne.tolist(),
+                "distance_m": distance_m,
+                "min_distance_m": distance_m,
+                "equivalent_radius_m": radius_m,
+                "influence_radius_m": influence_radius_m,
+                "velocity_ne": obs_velocities[risk_index].tolist(),
+                "speed_m_s": float(np.linalg.norm(obs_velocities[risk_index])),
+                "tcpa_s": float(usable_times[risk_index]),
+                "dcpa_m": float(separations[risk_index]),
+                "collision_margin_m": float(collision_margin_m[risk_index]),
+                "prediction_model": track.get("prediction_model", "sliding_window_acceleration"),
+            })
+
+        return self.apf_virtual_obstacles
 
     def apf_classify_encounter(self, obs_pos_body, obs_vel_body, own_vel_body):
         obs_pos_body = np.asarray(obs_pos_body, dtype=float).reshape(2)
@@ -1323,23 +1660,44 @@ class LaptopController:
         if not np.isfinite(obs_pos_body).all():
             return np.zeros(2, dtype=float), False
 
-        track = self.apf_track_for_obstacle(obstacle)
+        is_virtual = bool(obstacle.get("virtual", False))
+        track = None if is_virtual else self.apf_track_for_obstacle(obstacle)
         obs_vel_body = np.zeros(2, dtype=float)
-        if track is not None and track.get("hit_count", 0) >= 2:
-            obs_vel_body = self.earth_vector_to_body(track["vel_ne"])
+        obstacle_velocity_ne = np.asarray(obstacle.get("velocity_ne", [np.nan, np.nan]), dtype=float).reshape(2)
+        if np.isfinite(obstacle_velocity_ne).all():
+            obs_vel_body = self.earth_vector_to_body(obstacle_velocity_ne)
+        elif track is not None and track.get("hit_count", 0) >= 2:
+            track_velocity_ne = np.asarray(track.get("velocity_mean_ne", track["vel_ne"]), dtype=float).reshape(2)
+            if not np.isfinite(track_velocity_ne).all():
+                track_velocity_ne = np.asarray(track["vel_ne"], dtype=float).reshape(2)
+            obs_vel_body = self.earth_vector_to_body(track_velocity_ne)
 
-        distance_m = max(float(obstacle.get("min_distance_m", np.linalg.norm(obs_pos_body))), 1e-3)
+        if is_virtual:
+            distance_m = max(float(np.linalg.norm(obs_pos_body)), 1e-3)
+        else:
+            distance_m = max(float(obstacle.get("min_distance_m", np.linalg.norm(obs_pos_body))), 1e-3)
+
         obs_dir = obs_pos_body / max(float(np.linalg.norm(obs_pos_body)), 1e-3)
         away_dir = -obs_dir
         rel_vel_body = np.asarray(own_vel_body, dtype=float).reshape(2) - obs_vel_body
         closing_speed = float(np.dot(rel_vel_body, obs_dir))
         rel_speed = float(np.linalg.norm(rel_vel_body))
-        rho_dynamic = self.apf_km * np.sqrt((max(closing_speed, 0.0) * self.apf_collision_horizon_s) ** 2 + self.apf_safety_domain_m ** 2)
-        rho_upper = max(self.apf_static_influence_m, self.apf_dynamic_influence_max_m)
-        rho0 = float(np.clip(rho_dynamic, self.apf_static_influence_m, rho_upper))
+        if is_virtual:
+            obstacle_radius_m = float(obstacle.get("equivalent_radius_m", self.obstacle_min_equivalent_radius_m))
+            if not np.isfinite(obstacle_radius_m) or obstacle_radius_m <= 0.0:
+                obstacle_radius_m = self.obstacle_min_equivalent_radius_m
+            rho0 = max(
+                float(obstacle.get("influence_radius_m", self.apf_virtual_influence_scale * obstacle_radius_m)),
+                1e-3,
+            )
+        else:
+            rho_dynamic = self.apf_km * np.sqrt((max(closing_speed, 0.0) * self.apf_collision_horizon_s) ** 2 + self.apf_safety_domain_m ** 2)
+            rho_upper = max(self.apf_static_influence_m, self.apf_dynamic_influence_max_m)
+            rho0 = float(np.clip(rho_dynamic, self.apf_static_influence_m, rho_upper))
+
         obstacle_angle = abs(wrap_angle(float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))))
         in_front_sector = obstacle_angle <= self.apf_activation_front_half_angle_rad
-        active = distance_m <= rho0 and in_front_sector
+        active = distance_m <= rho0 and (in_front_sector or is_virtual)
 
         if not active:
             return np.zeros(2, dtype=float), False
@@ -1347,21 +1705,30 @@ class LaptopController:
         goal_distance = max(float(np.linalg.norm(target_body)), 1e-3)
         target_dir = np.asarray(target_body, dtype=float).reshape(2) / goal_distance
         distance_term = max(1.0 / distance_m - 1.0 / rho0, 0.0)
-        frep1 = self.apf_repulsive_gain * distance_term * (goal_distance ** 2) / (distance_m ** 2) * away_dir
-        frep2 = self.apf_repulsive_gain * (distance_term ** 2) * goal_distance * target_dir
+        repulsive_gain = self.apf_virtual_repulsive_gain if is_virtual else self.apf_repulsive_gain
+        frep1 = repulsive_gain * distance_term * (goal_distance ** 2) / (distance_m ** 2) * away_dir
+        frep2 = repulsive_gain * (distance_term ** 2) * goal_distance * target_dir
         force = frep1 + frep2
 
-        if closing_speed > 0.0 or distance_m <= self.apf_too_close_m:
+        if is_virtual or closing_speed > 0.0 or distance_m <= self.apf_too_close_m:
             force += self.apf_dynamic_repulsive_gain * max(closing_speed, 0.0) * away_dir
-            tcpa_s, dcpa_m = self.apf_cpa_metrics(obs_pos_body, obs_vel_body, own_vel_body)
-            encounter, requested_side, rule = self.apf_classify_encounter(obs_pos_body, obs_vel_body, own_vel_body)
-            risk = (
-                distance_m <= self.apf_too_close_m
-                or (
-                    tcpa_s <= self.apf_collision_horizon_s
-                    and dcpa_m <= self.apf_safety_domain_m
+            if is_virtual:
+                tcpa_s = float(obstacle.get("tcpa_s", np.nan))
+                dcpa_m = float(obstacle.get("dcpa_m", np.nan))
+                encounter = "dynamic_virtual_obstacle"
+                requested_side = self.apf_default_side_from_obstacle(obs_pos_body)
+                rule = "predicted collision point"
+                risk = True
+            else:
+                tcpa_s, dcpa_m = self.apf_cpa_metrics(obs_pos_body, obs_vel_body, own_vel_body)
+                encounter, requested_side, rule = self.apf_classify_encounter(obs_pos_body, obs_vel_body, own_vel_body)
+                risk = (
+                    distance_m <= self.apf_too_close_m
+                    or (
+                        tcpa_s <= self.apf_collision_horizon_s
+                        and dcpa_m <= self.apf_safety_domain_m
+                    )
                 )
-            )
 
             if risk and requested_side == 0.0:
                 requested_side = self.apf_default_side_from_obstacle(obs_pos_body)
@@ -1397,10 +1764,11 @@ class LaptopController:
 
     def apf_avoidance_needed(self):
         front_is_blocked = self.front_blocked()
+        virtual_obstacles = self.update_apf_virtual_obstacles()
         nearest_forward_distance_m = np.inf
         obstacle_needs_avoidance = False
 
-        for obstacle in self.lidar_obstacles:
+        for obstacle in self.lidar_obstacles + virtual_obstacles:
             obs_pos_body = np.asarray(obstacle.get("centre_body", [np.nan, np.nan]), dtype=float).reshape(2)
             if not np.isfinite(obs_pos_body).all():
                 continue
@@ -1409,7 +1777,8 @@ class LaptopController:
             angle_rad = abs(wrap_angle(float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))))
             if angle_rad <= self.apf_activation_front_half_angle_rad:
                 nearest_forward_distance_m = min(nearest_forward_distance_m, distance_m)
-                if distance_m <= self.apf_static_influence_m:
+                influence_m = float(obstacle.get("influence_radius_m", self.apf_static_influence_m))
+                if bool(obstacle.get("virtual", False)) or distance_m <= influence_m:
                     obstacle_needs_avoidance = True
 
         if front_is_blocked or obstacle_needs_avoidance:
@@ -1429,7 +1798,8 @@ class LaptopController:
         self.apf_target_ne = target_ne.copy()
         self.apf_attractive_force_body = attractive_force
 
-        for obstacle in self.lidar_obstacles:
+        virtual_obstacles = self.update_apf_virtual_obstacles()
+        for obstacle in self.lidar_obstacles + virtual_obstacles:
             repulsion, active = self.apf_repulsion_for_obstacle(obstacle, target_body, own_vel_body)
             repulsive_force += repulsion
             force_body += repulsion
