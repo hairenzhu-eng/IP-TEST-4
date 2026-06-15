@@ -54,9 +54,29 @@ webots_robot {
   supervisor TRUE
 }
 DEF MOVING_ROBOT_2 webots_robot {
-  translation 3.8 4.67 0.07383589158636242
+  translation 1.8 4.67 0.07383589158636242
   rotation 0 0 1 -1.5708
   name "moving_robot_2"
+  controller "<none>"
+  supervisor FALSE
+  fluidDynamics [
+  ]
+  physicsModel NULL
+}
+DEF MOVING_ROBOT webots_robot {
+  translation 4.8 -3.8 0.07383589158636242
+  rotation 0 0 1 1.5708
+  name "moving_robot"
+  controller "<none>"
+  supervisor FALSE
+  fluidDynamics [
+  ]
+  physicsModel NULL
+}
+DEF MOVING_ROBOT_3 webots_robot {
+  translation 7.8 4.67 0.07383589158636242
+  rotation 0 0 1 -1.5708
+  name "moving_robot_3"
   controller "<none>"
   supervisor FALSE
   fluidDynamics [
