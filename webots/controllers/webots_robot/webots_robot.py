@@ -660,6 +660,26 @@ class WebotsController(Supervisor):
         self.moving_robot_started = False
         self.motion_targets = []
         self.motion_target_configs = {
+            "CROSSING_LEFT_TO_RIGHT_ROBOT": {
+                "speed": 0.10,
+                "acceleration": 0.0,
+                "yaw_rate": 0.0,
+                "turn_radius": 0.0,
+                "lock_x": 4.8,
+                "wrap_y_top": 4.67,
+                "wrap_y_bottom": -3.8,
+                "start_with_zero_speed": True,
+            },
+            "CROSSING_RIGHT_TO_LEFT_ROBOT": {
+                "speed": 0.10,
+                "acceleration": 0.0,
+                "yaw_rate": 0.0,
+                "turn_radius": 0.0,
+                "lock_x": 4.8,
+                "wrap_y_top": 2.6,
+                "wrap_y_bottom": -3.8,
+                "start_with_zero_speed": True,
+            },
             "MOVING_ROBOT": {
                 "speed": 0.10,
                 "acceleration": 0.0,
@@ -709,7 +729,14 @@ class WebotsController(Supervisor):
             },
         }
 
-        for target_name in ("MOVING_ROBOT", "MOVING_ROBOT_2", "MOVING_ROBOT_3"):
+        moving_target_names = (
+            "CROSSING_LEFT_TO_RIGHT_ROBOT",
+            "CROSSING_RIGHT_TO_LEFT_ROBOT",
+            "MOVING_ROBOT",
+            "MOVING_ROBOT_2",
+            "MOVING_ROBOT_3",
+        )
+        for target_name in moving_target_names:
             node = self.getFromDef(target_name)
             if node is None:
                 continue

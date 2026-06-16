@@ -266,7 +266,7 @@ class LaptopController:
         self.route_heading_rad = float(np.arctan2(self.route_path_unit_ne[1], self.route_path_unit_ne[0]))
         self.route_tracking_speed_m_s = 0.55 if self.OPERATING_MODE == 2 else 0.35
         self.route_tracking_lookahead_m = 1.0 if self.OPERATING_MODE == 2 else 0.7
-        self.final_approach_distance_m = 1.4 if self.OPERATING_MODE == 2 else 1.1
+        self.final_approach_distance_m = 1.0 if self.OPERATING_MODE == 2 else 0.7
         self.final_slowdown_distance_m = 1.0 if self.OPERATING_MODE == 2 else 0.8
         self.final_heading_slow_angle_rad = np.deg2rad(75.0)
         self.max_heading_deviation_rad = np.deg2rad(60.0)
