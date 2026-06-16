@@ -254,7 +254,7 @@ class LaptopController:
         # ---------------- Navigation parameters ----------------
         self.start_ne = np.array([start_north, start_east], dtype=float)
         self.goal_ne = np.array([goal_north, goal_east], dtype=float)
-        self.goal_tolerance_m = 0.30
+        self.goal_tolerance_m = 0.40
         self.navigation_mode = "track"
         self.goal_reached = False
         self.route_path_vec_ne = self.goal_ne - self.start_ne
@@ -264,8 +264,11 @@ class LaptopController:
         else:
             self.route_path_unit_ne = np.array([1.0, 0.0], dtype=float)
         self.route_heading_rad = float(np.arctan2(self.route_path_unit_ne[1], self.route_path_unit_ne[0]))
-        self.route_tracking_speed_m_s = 0.25 if self.OPERATING_MODE == 2 else 0.16
+        self.route_tracking_speed_m_s = 0.55 if self.OPERATING_MODE == 2 else 0.35
         self.route_tracking_lookahead_m = 1.0 if self.OPERATING_MODE == 2 else 0.7
+        self.final_approach_distance_m = 1.4 if self.OPERATING_MODE == 2 else 1.1
+        self.final_slowdown_distance_m = 1.0 if self.OPERATING_MODE == 2 else 0.8
+        self.final_heading_slow_angle_rad = np.deg2rad(75.0)
         self.max_heading_deviation_rad = np.deg2rad(60.0)
         self.heading_deviation_guard_rad = np.deg2rad(55.0)
         self.heading_deviation_return_gain = 3.0
@@ -274,7 +277,8 @@ class LaptopController:
         self.apf_static_influence_m = 5.0 if self.OPERATING_MODE == 2 else 5.5
         self.apf_dynamic_influence_max_m = 5.0 if self.OPERATING_MODE == 2 else 6.5
         self.apf_activation_front_half_angle_rad = np.deg2rad(150.0)
-        self.apf_goal_gain = 2.5
+        self.apf_priority_front_half_angle_rad = np.deg2rad(90.0)
+        self.apf_goal_gain = 3.5
         self.apf_path_gain = 2.5
         self.apf_repulsive_gain = 0.08
         self.apf_dynamic_repulsive_gain = 0.10
@@ -292,6 +296,8 @@ class LaptopController:
         self.apf_heading_gain = 0.9
         self.apf_heading_step_limit_rad = np.deg2rad(60.0)
         self.apf_min_forward_speed = 0.06
+        self.apf_pass_astern_gain = 2.2
+        self.apf_pass_astern_speed_scale = 0.35
         self.apf_force_body = np.zeros(2, dtype=float)
         self.apf_repulsive_force_body = np.zeros(2, dtype=float)
         self.apf_attractive_force_body = np.zeros(2, dtype=float)
@@ -1395,6 +1401,22 @@ class LaptopController:
         dcpa = float(np.linalg.norm(obs_pos_body + rel_vel * tcpa))
         return tcpa, dcpa
 
+    def apf_pass_astern_side_from_velocity(self, obs_vel_body):
+        obs_vel_body = np.asarray(obs_vel_body, dtype=float).reshape(2)
+        if not np.isfinite(obs_vel_body).all():
+            return 0.0
+
+        if float(np.linalg.norm(obs_vel_body)) < self.apf_dynamic_speed_threshold_m_s:
+            return 0.0
+
+        lateral_speed = float(obs_vel_body[1])
+        if abs(lateral_speed) < self.apf_dynamic_speed_threshold_m_s:
+            return 0.0
+
+        # Body y is positive to port/left. Passing astern means steering toward
+        # the side the obstacle came from, opposite to its lateral velocity.
+        return -float(np.sign(lateral_speed))
+
     def own_prediction_velocity_ne(self):
         own_vel_ne = np.asarray(self.v_robot[0:2], dtype=float).reshape(2)
         if np.isfinite(own_vel_ne).all() and float(np.linalg.norm(own_vel_ne)) >= self.apf_dynamic_speed_threshold_m_s:
@@ -1551,11 +1573,15 @@ class LaptopController:
         ):
             return "overtaking", 1.0, "COLREG Rule 13: overtake on port side"
 
+        pass_astern_side = self.apf_pass_astern_side_from_velocity(obs_vel_body)
+
         if 0.0 < bearing_starboard_deg <= 112.5:
-            return "crossing_from_starboard", -1.0, "COLREG Rule 15: give way to starboard"
+            requested_side = pass_astern_side if pass_astern_side != 0.0 else -1.0
+            return "crossing_from_starboard", requested_side, "COLREG Rule 15: give way, pass astern"
 
         if -112.5 <= bearing_starboard_deg < 0.0:
-            return "crossing_from_port", -1.0, "COLREG Rule 17 fallback: avoid to starboard"
+            requested_side = pass_astern_side if pass_astern_side != 0.0 else -1.0
+            return "crossing_from_port", requested_side, "COLREG Rule 17 fallback: pass astern"
 
         return "static_obstacle", 0.0, "none"
 
@@ -1573,7 +1599,15 @@ class LaptopController:
 
         return -1.0 if body_angle_rad > 0.0 else 1.0
 
-    def apf_lock_side(self, requested_side, obstacle_distance_m):
+    def apf_obstacle_in_priority_front_sector(self, obstacle):
+        obs_pos_body = np.asarray(obstacle.get("centre_body", [np.nan, np.nan]), dtype=float).reshape(2)
+        if not np.isfinite(obs_pos_body).all():
+            return False
+
+        body_angle_rad = float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))
+        return abs(wrap_angle(body_angle_rad)) <= self.apf_priority_front_half_angle_rad
+
+    def apf_lock_side(self, requested_side, obstacle_distance_m, allow_override=False):
         now_s = float(self.timefromstart) if self.timefromstart is not None else 0.0
         obstacle_close = (
             np.isfinite(obstacle_distance_m)
@@ -1589,11 +1623,17 @@ class LaptopController:
             self.apf_side_lock_active = False
             return 0.0
 
-        if self.apf_side_lock_sign != 0.0 and (obstacle_close or now_s < self.apf_side_lock_until_s):
+        requested_side = float(np.sign(requested_side))
+        lock_conflicts = self.apf_side_lock_sign != 0.0 and self.apf_side_lock_sign != requested_side
+        if (
+            self.apf_side_lock_sign != 0.0
+            and (obstacle_close or now_s < self.apf_side_lock_until_s)
+            and not (allow_override and lock_conflicts)
+        ):
             self.apf_side_lock_active = True
             return self.apf_side_lock_sign
 
-        self.apf_side_lock_sign = float(np.sign(requested_side))
+        self.apf_side_lock_sign = requested_side
         self.apf_side_lock_until_s = now_s + self.apf_side_lock_s
         self.apf_side_lock_active = True
         return self.apf_side_lock_sign
@@ -1628,6 +1668,27 @@ class LaptopController:
         target_along_m = float(np.clip(along_m + lookahead_m, 0.0, self.route_path_length_m))
         target_ne = self.start_ne + target_along_m * self.route_path_unit_ne
         return closest_along_m, target_ne
+
+    def goal_distance_m(self):
+        current_ne = np.array([float(self.North), float(self.East)], dtype=float)
+        return float(np.linalg.norm(self.goal_ne - current_ne))
+
+    def final_approach_active(self, final_distance_m=None):
+        if final_distance_m is None:
+            final_distance_m = self.goal_distance_m()
+
+        if not np.isfinite(final_distance_m):
+            return False
+
+        if final_distance_m <= self.final_approach_distance_m:
+            return True
+
+        if self.route_path_length_m < 1e-9:
+            return True
+
+        current_ne = np.array([float(self.North), float(self.East)], dtype=float)
+        along_m = float(np.dot(current_ne - self.start_ne, self.route_path_unit_ne))
+        return along_m >= self.route_path_length_m - self.final_approach_distance_m
 
     def apf_path_attraction_body(self):
         path_vec = self.goal_ne - self.start_ne
@@ -1682,6 +1743,7 @@ class LaptopController:
         rel_vel_body = np.asarray(own_vel_body, dtype=float).reshape(2) - obs_vel_body
         closing_speed = float(np.dot(rel_vel_body, obs_dir))
         rel_speed = float(np.linalg.norm(rel_vel_body))
+        pass_astern_side = self.apf_pass_astern_side_from_velocity(obs_vel_body)
         if is_virtual:
             obstacle_radius_m = float(obstacle.get("equivalent_radius_m", self.obstacle_min_equivalent_radius_m))
             if not np.isfinite(obstacle_radius_m) or obstacle_radius_m <= 0.0:
@@ -1716,8 +1778,9 @@ class LaptopController:
                 tcpa_s = float(obstacle.get("tcpa_s", np.nan))
                 dcpa_m = float(obstacle.get("dcpa_m", np.nan))
                 encounter = "dynamic_virtual_obstacle"
-                requested_side = self.apf_default_side_from_obstacle(obs_pos_body)
-                rule = "predicted collision point"
+                pass_astern_active = pass_astern_side != 0.0
+                requested_side = pass_astern_side if pass_astern_active else self.apf_default_side_from_obstacle(obs_pos_body)
+                rule = "predicted collision point: pass astern" if pass_astern_active else "predicted collision point"
                 risk = True
             else:
                 tcpa_s, dcpa_m = self.apf_cpa_metrics(obs_pos_body, obs_vel_body, own_vel_body)
@@ -1729,6 +1792,9 @@ class LaptopController:
                         and dcpa_m <= self.apf_safety_domain_m
                     )
                 )
+                pass_astern_active = risk and pass_astern_side != 0.0 and encounter.startswith("crossing")
+                if pass_astern_active:
+                    requested_side = pass_astern_side
 
             if risk and requested_side == 0.0:
                 requested_side = self.apf_default_side_from_obstacle(obs_pos_body)
@@ -1736,12 +1802,27 @@ class LaptopController:
             if requested_side == 0.0 and in_front_sector:
                 requested_side = self.apf_default_side_from_obstacle(obs_pos_body)
 
-            side_sign = self.apf_lock_side(requested_side if (risk or in_front_sector) else 0.0, distance_m)
+            side_sign = self.apf_lock_side(
+                requested_side if (risk or in_front_sector) else 0.0,
+                distance_m,
+                allow_override=pass_astern_active,
+            )
+            proximity = max((rho0 - distance_m) / max(rho0, 1e-6), 0.0)
+            if pass_astern_active:
+                obs_speed = float(np.linalg.norm(obs_vel_body))
+                if obs_speed >= self.apf_dynamic_speed_threshold_m_s:
+                    astern_dir = -obs_vel_body / max(obs_speed, 1e-6)
+                    force += (
+                        self.apf_pass_astern_gain
+                        * max(obs_speed, rel_speed, 0.25)
+                        * max(proximity, 0.35)
+                        * astern_dir
+                    )
+
             if side_sign != 0.0:
                 lateral_dir = np.array([-obs_dir[1], obs_dir[0]], dtype=float)
                 rel_cross = obs_dir[0] * rel_vel_body[1] - obs_dir[1] * rel_vel_body[0]
                 theta_sin = abs(float(rel_cross)) / max(rel_speed, 1e-6)
-                proximity = max((rho0 - distance_m) / max(rho0, 1e-6), 0.0)
                 side_force = (
                     side_sign
                     * self.apf_colreg_side_gain
@@ -1787,9 +1868,15 @@ class LaptopController:
         return self.refresh_apf_side_lock(nearest_forward_distance_m)
 
     def compute_apf_control(self, t, u_track):
-        _, target_ne = self.route_progress_and_point(self.apf_route_lookahead_m)
+        final_approach = self.final_approach_active()
+        if final_approach:
+            target_ne = self.goal_ne.copy()
+        else:
+            _, target_ne = self.route_progress_and_point(self.apf_route_lookahead_m)
+
         target_body = self.earth_point_to_body(target_ne)
-        attractive_force = self.apf_goal_attraction_body(target_body) + self.apf_path_attraction_body()
+        path_force = np.zeros(2, dtype=float) if final_approach else self.apf_path_attraction_body()
+        attractive_force = self.apf_goal_attraction_body(target_body) + path_force
         force_body = attractive_force.copy()
         repulsive_force = np.zeros(2, dtype=float)
         own_vel_body = self.current_velocity_body()
@@ -1799,11 +1886,27 @@ class LaptopController:
         self.apf_attractive_force_body = attractive_force
 
         virtual_obstacles = self.update_apf_virtual_obstacles()
-        for obstacle in self.lidar_obstacles + virtual_obstacles:
+        obstacles = self.lidar_obstacles + virtual_obstacles
+        priority_obstacles = []
+        secondary_obstacles = []
+        for obstacle in obstacles:
+            if self.apf_obstacle_in_priority_front_sector(obstacle):
+                priority_obstacles.append(obstacle)
+            else:
+                secondary_obstacles.append(obstacle)
+
+        for obstacle in priority_obstacles:
             repulsion, active = self.apf_repulsion_for_obstacle(obstacle, target_body, own_vel_body)
             repulsive_force += repulsion
             force_body += repulsion
             any_repulsion = any_repulsion or active
+
+        if not any_repulsion:
+            for obstacle in secondary_obstacles:
+                repulsion, active = self.apf_repulsion_for_obstacle(obstacle, target_body, own_vel_body)
+                repulsive_force += repulsion
+                force_body += repulsion
+                any_repulsion = any_repulsion or active
 
         if any_repulsion and self.apf_side_lock_sign != 0.0:
             route_normal_left_ne = np.array(
@@ -1858,9 +1961,12 @@ class LaptopController:
         u_cmd = Vector(2)
         u_cmd[1, 0] = np.clip(-self.apf_heading_gain * force_angle / max(self.lastdt, 1e-3), -self.w_max, self.w_max)
 
-        base_speed = max(float(u_track[0, 0]), self.apf_min_forward_speed)
+        min_base_speed = 0.0 if final_approach else self.apf_min_forward_speed
+        base_speed = max(float(u_track[0, 0]), min_base_speed)
         speed_scale = max(np.cos(force_angle), 0.15)
         u_cmd[0, 0] = float(np.clip(base_speed * speed_scale, 0.0, self.v_max))
+        if self.apf_colreg_active and "pass astern" in self.apf_colreg_rule:
+            u_cmd[0, 0] = min(float(u_cmd[0, 0]), base_speed * self.apf_pass_astern_speed_scale)
 
         if any_repulsion or self.apf_colreg_active or self.apf_side_lock_active:
             if self.apf_colreg_active:
@@ -1873,13 +1979,43 @@ class LaptopController:
         return u_cmd
 
     def compute_route_tracking_control(self, t):
+        current_ne = np.array([self.North, self.East], dtype=float)
+        final_distance = float(np.linalg.norm(self.goal_ne - current_ne))
+
+        if self.final_approach_active(final_distance):
+            ref_ne = self.goal_ne.copy()
+            to_goal_ne = ref_ne - current_ne
+            if final_distance > 1e-6:
+                desired_heading = float(np.arctan2(to_goal_ne[1], to_goal_ne[0]))
+            else:
+                desired_heading = self.route_heading_rad
+
+            heading_error = wrap_angle(float(self.Yaw) - desired_heading)
+            speed_fraction = float(np.clip(final_distance / max(self.final_slowdown_distance_m, 1e-3), 0.0, 1.0))
+            if abs(heading_error) >= self.final_heading_slow_angle_rad:
+                heading_speed_scale = 0.0
+            else:
+                heading_speed_scale = max(float(np.cos(heading_error)), 0.15)
+
+            p_ref = Vector(3)
+            p_ref[0, 0] = ref_ne[0]
+            p_ref[1, 0] = ref_ne[1]
+            p_ref[2, 0] = desired_heading
+
+            u_ref = Vector(2)
+            u_ref[0, 0] = self.route_tracking_speed_m_s * speed_fraction
+
+            u_track = Vector(2)
+            u_track[0, 0] = self.route_tracking_speed_m_s * speed_fraction * heading_speed_scale
+            u_track[1, 0] = 1.4 * heading_error
+            return p_ref, u_ref, u_track
+
         # Track the straight start-goal line by projecting the current position onto
         # the route and aiming at a short look-ahead point on that same line.
         _, ref_ne = self.route_progress_and_point(self.route_tracking_lookahead_m)
 
         # Convert route error into the robot body frame:
         # lateral error and heading error adjust yaw rate while surge stays steady.
-        current_ne = np.array([self.North, self.East], dtype=float)
         error_body = self.earth_vector_to_body(ref_ne - current_ne)
         heading_error = wrap_angle(float(self.Yaw) - self.route_heading_rad)
 
@@ -2138,12 +2274,8 @@ class LaptopController:
             ### ROUTE TRACKING + MODIFIED APF CONTROL #######
             t = self.timefromstart
             _, _, u_track = self.compute_route_tracking_control(t)
-            final_distance = float(
-                np.linalg.norm(
-                    self.goal_ne
-                    - np.array([float(self.North), float(self.East)], dtype=float)
-                )
-            )
+            final_distance = self.goal_distance_m()
+            final_approach = self.final_approach_active(final_distance)
 
             if final_distance <= self.goal_tolerance_m:
                 self.goal_reached = True
@@ -2165,7 +2297,8 @@ class LaptopController:
                 self.u[0, 0] = 0.0
                 self.u[1, 0] = 0.0
             else:
-                self.u[1, 0] = self.limit_heading_deviation_command(self.u[1, 0])
+                if not final_approach:
+                    self.u[1, 0] = self.limit_heading_deviation_command(self.u[1, 0])
                 self.u[1, 0] = np.clip(self.u[1, 0], -self.w_max, self.w_max)
                 self.u[0, 0] = np.clip(self.u[0, 0], 0.0, self.v_max)
             self.prev_sensed = t
