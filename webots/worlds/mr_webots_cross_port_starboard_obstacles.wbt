@@ -1,0 +1,76 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "../protos/webots_robot.proto"
+
+WorldInfo {
+  info [
+    "Maritime Robotics simulation using webots."
+    "Crossing scenario with target vessels approaching from both port and starboard."
+  ]
+  title "MR Webots Crossing Port and Starboard Obstacles"
+  basicTimeStep 8
+  lineScale 0.15
+}
+Viewpoint {
+  fieldOfView 1
+  orientation -0.038853624461643095 0.9975840780850325 -0.057588219432706735 0.6977046848903596
+  position -7.28931350156161 -3.467640750226145 7.700541406782872
+}
+Background {
+  skyColor [
+    0.86 0.9 0.95
+  ]
+}
+DirectionalLight {
+  ambientIntensity 0.6
+  direction -0.3 -0.4 -1
+  intensity 0.8
+  castShadows FALSE
+}
+Fluid {
+  translation 1 -1 -0.25
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.0626841 0.552224 0.723339
+        transparency 0.65
+        roughness 0.02
+        metalness 0
+      }
+      geometry DEF WATER_VOLUME Box {
+        size 1000 1000 0.5
+      }
+    }
+  ]
+  name "water"
+  density 1000
+  viscosity 0.001
+  boundingObject USE WATER_VOLUME
+  locked TRUE
+}
+webots_robot {
+  translation 0 -1 0.07383589158636242
+  rotation -1.142118617785172e-05 0.9999999999332324 1.7582952741897195e-06 0.0009182620430999692
+  controller "webots_robot"
+  supervisor TRUE
+}
+DEF CROSSING_PORT_TO_STARBOARD_ROBOT webots_robot {
+  translation 2.2 2.0 0.07383589158636242
+  rotation 0 0 1 -1.5708
+  name "crossing_port_to_starboard_robot"
+  controller "<none>"
+  supervisor FALSE
+  fluidDynamics [
+  ]
+  physicsModel NULL
+}
+DEF CROSSING_STARBOARD_TO_PORT_ROBOT webots_robot {
+  translation 7.4 -4.0 0.07383589158636242
+  rotation 0 0 1 1.5708
+  name "crossing_starboard_to_port_robot"
+  controller "<none>"
+  supervisor FALSE
+  fluidDynamics [
+  ]
+  physicsModel NULL
+}

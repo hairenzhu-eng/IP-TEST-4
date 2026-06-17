@@ -1528,6 +1528,31 @@ class LaptopController:
                 continue
 
             distance_m = max(float(np.linalg.norm(centre_body)), 1e-3)
+            current_obs_pos_ne = np.asarray(track.get("pos_ne", obs_positions[risk_index]), dtype=float).reshape(2)
+            if not np.isfinite(current_obs_pos_ne).all():
+                current_obs_pos_ne = obs_positions[risk_index]
+            current_obs_vel_ne = np.asarray(
+                track.get("velocity_mean_ne", track.get("vel_ne", obs_velocities[risk_index])),
+                dtype=float,
+            ).reshape(2)
+            if not np.isfinite(current_obs_vel_ne).all():
+                current_obs_vel_ne = obs_velocities[risk_index]
+
+            encounter, requested_side, rule = "dynamic_virtual_obstacle", 0.0, "predicted collision point"
+            current_obs_body = self.earth_point_to_body(current_obs_pos_ne)
+            current_obs_vel_body = self.earth_vector_to_body(current_obs_vel_ne)
+            current_own_vel_body = self.earth_vector_to_body(own_vel_ne)
+            if (
+                np.isfinite(current_obs_body).all()
+                and np.isfinite(current_obs_vel_body).all()
+                and np.isfinite(current_own_vel_body).all()
+            ):
+                encounter, requested_side, rule = self.apf_classify_encounter(
+                    current_obs_body,
+                    current_obs_vel_body,
+                    current_own_vel_body,
+                )
+
             self.apf_virtual_obstacles.append({
                 "label": -1000 - int(track.get("id", 0)),
                 "virtual": True,
@@ -1544,6 +1569,9 @@ class LaptopController:
                 "tcpa_s": float(usable_times[risk_index]),
                 "dcpa_m": float(separations[risk_index]),
                 "collision_margin_m": float(collision_margin_m[risk_index]),
+                "encounter_mode": encounter,
+                "requested_side": float(requested_side),
+                "colreg_rule": rule,
                 "prediction_model": track.get("prediction_model", "sliding_window_acceleration"),
             })
 
@@ -1557,9 +1585,10 @@ class LaptopController:
         bearing_starboard_deg = float(np.rad2deg(wrap_angle(-body_angle_rad)))
         obs_speed = float(np.linalg.norm(obs_vel_body))
         own_speed = float(np.linalg.norm(own_vel_body))
+        dynamic_obstacle = obs_speed >= self.apf_dynamic_speed_threshold_m_s
         relative_heading_deg = np.nan
 
-        if obs_speed >= self.apf_dynamic_speed_threshold_m_s:
+        if dynamic_obstacle:
             relative_heading_deg = abs(float(np.rad2deg(wrap_angle(np.arctan2(obs_vel_body[1], obs_vel_body[0])))))
 
         if np.isfinite(relative_heading_deg) and abs(bearing_starboard_deg) <= 22.5 and relative_heading_deg >= 157.5:
@@ -1575,13 +1604,12 @@ class LaptopController:
 
         pass_astern_side = self.apf_pass_astern_side_from_velocity(obs_vel_body)
 
-        if 0.0 < bearing_starboard_deg <= 112.5:
+        if dynamic_obstacle and 0.0 < bearing_starboard_deg <= 112.5:
             requested_side = pass_astern_side if pass_astern_side != 0.0 else -1.0
             return "crossing_from_starboard", requested_side, "COLREG Rule 15: give way, pass astern"
 
-        if -112.5 <= bearing_starboard_deg < 0.0:
-            requested_side = pass_astern_side if pass_astern_side != 0.0 else -1.0
-            return "crossing_from_port", requested_side, "COLREG Rule 17 fallback: pass astern"
+        if dynamic_obstacle and -112.5 <= bearing_starboard_deg < 0.0:
+            return "crossing_from_port", 0.0, "COLREG Rule 17: stand on"
 
         return "static_obstacle", 0.0, "none"
 
@@ -1764,6 +1792,31 @@ class LaptopController:
         if not active:
             return np.zeros(2, dtype=float), False
 
+        tcpa_s = np.nan
+        dcpa_m = np.nan
+        encounter = "dynamic_virtual_obstacle" if is_virtual else "static_obstacle"
+        requested_side = 0.0
+        rule = "none"
+        risk = False
+        if not is_virtual:
+            tcpa_s, dcpa_m = self.apf_cpa_metrics(obs_pos_body, obs_vel_body, own_vel_body)
+            encounter, requested_side, rule = self.apf_classify_encounter(obs_pos_body, obs_vel_body, own_vel_body)
+            risk = (
+                distance_m <= self.apf_too_close_m
+                or (
+                    tcpa_s <= self.apf_collision_horizon_s
+                    and dcpa_m <= self.apf_safety_domain_m
+                )
+            )
+            if encounter == "crossing_from_port" and not risk:
+                self.apf_encounter_mode = encounter
+                self.apf_colreg_rule = rule
+                self.apf_avoidance_side_sign = 0.0
+                self.apf_colreg_dcpa_m = dcpa_m
+                self.apf_colreg_tcpa_s = tcpa_s
+                self.apf_colreg_active = False
+                return np.zeros(2, dtype=float), False
+
         goal_distance = max(float(np.linalg.norm(target_body)), 1e-3)
         target_dir = np.asarray(target_body, dtype=float).reshape(2) / goal_distance
         distance_term = max(1.0 / distance_m - 1.0 / rho0, 0.0)
@@ -1772,27 +1825,37 @@ class LaptopController:
         frep2 = repulsive_gain * (distance_term ** 2) * goal_distance * target_dir
         force = frep1 + frep2
 
-        if is_virtual or closing_speed > 0.0 or distance_m <= self.apf_too_close_m:
+        if is_virtual or risk or closing_speed > 0.0 or distance_m <= self.apf_too_close_m:
             force += self.apf_dynamic_repulsive_gain * max(closing_speed, 0.0) * away_dir
             if is_virtual:
                 tcpa_s = float(obstacle.get("tcpa_s", np.nan))
                 dcpa_m = float(obstacle.get("dcpa_m", np.nan))
-                encounter = "dynamic_virtual_obstacle"
-                pass_astern_active = pass_astern_side != 0.0
-                requested_side = pass_astern_side if pass_astern_active else self.apf_default_side_from_obstacle(obs_pos_body)
-                rule = "predicted collision point: pass astern" if pass_astern_active else "predicted collision point"
+                encounter = obstacle.get("encounter_mode", "dynamic_virtual_obstacle")
+                rule = obstacle.get("colreg_rule", "predicted collision point")
+                if encounter == "crossing_from_port":
+                    requested_side = -1.0
+                    rule = "COLREG Rule 17: stand-on reactive avoidance, alter to starboard"
+                    pass_astern_active = False
+                else:
+                    requested_side = float(obstacle.get("requested_side", 0.0))
+                    pass_astern_active = pass_astern_side != 0.0
+                    if pass_astern_active:
+                        requested_side = pass_astern_side
+                        rule = "predicted collision point: pass astern"
+                    elif requested_side == 0.0:
+                        requested_side = self.apf_default_side_from_obstacle(obs_pos_body)
                 risk = True
             else:
-                tcpa_s, dcpa_m = self.apf_cpa_metrics(obs_pos_body, obs_vel_body, own_vel_body)
-                encounter, requested_side, rule = self.apf_classify_encounter(obs_pos_body, obs_vel_body, own_vel_body)
-                risk = (
-                    distance_m <= self.apf_too_close_m
-                    or (
-                        tcpa_s <= self.apf_collision_horizon_s
-                        and dcpa_m <= self.apf_safety_domain_m
+                if encounter == "crossing_from_port" and risk:
+                    requested_side = -1.0
+                    rule = "COLREG Rule 17: stand-on reactive avoidance, alter to starboard"
+                    pass_astern_active = False
+                else:
+                    pass_astern_active = (
+                        risk
+                        and pass_astern_side != 0.0
+                        and encounter == "crossing_from_starboard"
                     )
-                )
-                pass_astern_active = risk and pass_astern_side != 0.0 and encounter.startswith("crossing")
                 if pass_astern_active:
                     requested_side = pass_astern_side
 
@@ -1965,7 +2028,10 @@ class LaptopController:
         base_speed = max(float(u_track[0, 0]), min_base_speed)
         speed_scale = max(np.cos(force_angle), 0.15)
         u_cmd[0, 0] = float(np.clip(base_speed * speed_scale, 0.0, self.v_max))
-        if self.apf_colreg_active and "pass astern" in self.apf_colreg_rule:
+        if self.apf_colreg_active and (
+            "pass astern" in self.apf_colreg_rule
+            or "reactive avoidance" in self.apf_colreg_rule
+        ):
             u_cmd[0, 0] = min(float(u_cmd[0, 0]), base_speed * self.apf_pass_astern_speed_scale)
 
         if any_repulsion or self.apf_colreg_active or self.apf_side_lock_active:
