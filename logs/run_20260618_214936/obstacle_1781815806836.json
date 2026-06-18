@@ -1,0 +1,79 @@
+{
+  "t": 30.221176385879517,
+  "timestamp_s": 1781815806.8364289,
+  "robot_pos": [
+    4.677541455837666,
+    1.672364999897809
+  ],
+  "robot_yaw_rad": -0.0026823472094167104,
+  "cloud": [],
+  "clusters": [
+    {
+      "label": 0,
+      "point_count": 25,
+      "centre_body": [
+        -0.5822061204058105,
+        -0.6311020037667339
+      ],
+      "centre_ne": [
+        4.027278815453026,
+        1.041649361645316
+      ],
+      "distance_m": 0.8586347918622746,
+      "angle_rad": -2.3159166430550253,
+      "angle_deg": -132.6922493511585,
+      "min_distance_m": 0.7915991526544032,
+      "cluster_radius_m": 0.16935828723981874,
+      "cluster_size_m": 0.293835817972085,
+      "equivalent_radius_m": 0.18,
+      "influence_radius_m": 3.5999999999999996
+    }
+  ],
+  "tracks": [],
+  "virtual_obstacles": [],
+  "apf": {
+    "navigation_mode": "apf_colreg",
+    "encounter": "static_obstacle",
+    "colreg_rule": "none",
+    "side": -1.0,
+    "dcpa_m": null,
+    "tcpa_s": null,
+    "force_body": [
+      12.416507547703816,
+      -0.2326429570154831
+    ],
+    "repulsive_force_body": [
+      0.23392097949939317,
+      0.7153120644975953
+    ],
+    "attractive_force_body": [
+      12.182586568204423,
+      -0.9479550215130783
+    ],
+    "target_ne": [
+      6.777541455837666,
+      3.0
+    ]
+  },
+  "apf_settings": {
+    "own_equivalent_radius_m": 0.3,
+    "safety_domain_m": 2.5,
+    "collision_horizon_s": 10.0,
+    "prediction_dt_s": 0.5,
+    "constant_descent_speed_m_s": 0.85,
+    "obstacle_ekf_prediction_enabled": false,
+    "obstacle_prediction_horizon_s": 5.0,
+    "obstacle_prediction_step_s": 0.5,
+    "dynamic_speed_enter_m_s": 0.06,
+    "dynamic_speed_exit_m_s": 0.04,
+    "prediction_min_samples": 3,
+    "prediction_min_time_span_s": 0.8,
+    "prediction_max_speed_std_m_s": 0.1,
+    "prediction_max_heading_var_rad2": 0.373156339238718,
+    "cluster_influence_scale": 20.0
+  },
+  "dbscan": {
+    "eps_m": 0.2,
+    "min_samples": 3
+  }
+}

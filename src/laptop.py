@@ -307,8 +307,10 @@ class LaptopController:
         self.apf_heading_gain = 0.9
         self.apf_heading_step_limit_rad = np.deg2rad(60.0)
         self.apf_min_forward_speed = 0.06
+        # Fixed-step APF descent: the potential-field gradient determines only
+        # the travel direction while avoidance uses a constant surge speed.
+        self.apf_constant_descent_speed_m_s = self.route_tracking_speed_m_s
         self.apf_pass_astern_gain = 2.2
-        self.apf_pass_astern_speed_scale = 0.35
         self.apf_force_body = np.zeros(2, dtype=float)
         self.apf_repulsive_force_body = np.zeros(2, dtype=float)
         self.apf_attractive_force_body = np.zeros(2, dtype=float)
@@ -338,8 +340,8 @@ class LaptopController:
         self.obstacle_prediction_step_s = 0.5
         self.obstacle_history_len = 60
         self.obstacle_stats_window_s = 2.5
-        self.obstacle_prediction_min_samples = 6
-        self.obstacle_prediction_min_hits = 6
+        self.obstacle_prediction_min_samples = 3
+        self.obstacle_prediction_min_hits = 3
         self.obstacle_prediction_min_time_span_s = 0.8
         self.obstacle_prediction_max_speed_std_m_s = 0.10
         self.obstacle_prediction_max_heading_var_rad2 = np.deg2rad(35.0) ** 2
@@ -918,6 +920,7 @@ class LaptopController:
                 "safety_domain_m": self.apf_safety_domain_m,
                 "collision_horizon_s": self.apf_collision_horizon_s,
                 "prediction_dt_s": self.apf_prediction_dt_s,
+                "constant_descent_speed_m_s": self.apf_constant_descent_speed_m_s,
                 "obstacle_ekf_prediction_enabled": self.obstacle_ekf_prediction_enabled,
                 "obstacle_prediction_horizon_s": self.obstacle_prediction_horizon_s,
                 "obstacle_prediction_step_s": self.obstacle_prediction_step_s,
@@ -1553,12 +1556,12 @@ class LaptopController:
             speed_m_s = float(np.linalg.norm(velocity_ne))
             heading_rad = float(np.arctan2(velocity_ne[1], velocity_ne[0])) if speed_m_s >= 1e-3 else np.nan
 
-            prediction_track = {
-                "state": state,
-                "velocity_mean_ne": velocity_ne,
-                "accel_ne": track.get("accel_ne", [0.0, 0.0]),
-                "stats_sample_count": int(track.get("stats_sample_count", 0)),
-            }
+            # Preserve the complete statistical state so the visualised
+            # trajectory uses the same acceleration/stability gates as the
+            # collision predictor and APF controller.
+            prediction_track = dict(track)
+            prediction_track["state"] = state
+            prediction_track["velocity_mean_ne"] = velocity_ne
             prediction_ne = self.obstacle_track_prediction_ne(prediction_track)
             history_ne = np.asarray(track.get("history_ne", []), dtype=float)
             if history_ne.ndim != 2 or history_ne.shape[1] != 2:
@@ -2283,15 +2286,16 @@ class LaptopController:
         u_cmd = Vector(2)
         u_cmd[1, 0] = np.clip(-self.apf_heading_gain * force_angle / max(self.lastdt, 1e-3), -self.w_max, self.w_max)
 
-        min_base_speed = 0.0 if final_approach else self.apf_min_forward_speed
-        base_speed = max(float(u_track[0, 0]), min_base_speed)
-        speed_scale = max(np.cos(force_angle), 0.15)
-        u_cmd[0, 0] = float(np.clip(base_speed * speed_scale, 0.0, self.v_max))
-        if self.apf_colreg_active and (
-            "pass astern" in self.apf_colreg_rule
-            or "reactive avoidance" in self.apf_colreg_rule
-        ):
-            u_cmd[0, 0] = min(float(u_cmd[0, 0]), base_speed * self.apf_pass_astern_speed_scale)
+        # Use constant-speed (fixed-step) descent during APF avoidance.  The
+        # gradient magnitude no longer changes surge speed; only its direction
+        # changes the commanded heading.
+        u_cmd[0, 0] = float(
+            np.clip(
+                self.apf_constant_descent_speed_m_s,
+                0.0,
+                self.v_max,
+            )
+        )
 
         if any_repulsion or self.apf_colreg_active or self.apf_side_lock_active:
             if self.apf_colreg_active:

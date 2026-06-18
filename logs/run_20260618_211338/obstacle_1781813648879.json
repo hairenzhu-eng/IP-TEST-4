@@ -1,0 +1,79 @@
+{
+  "t": 30.214200258255005,
+  "timestamp_s": 1781813648.87901,
+  "robot_pos": [
+    4.579287172458113,
+    1.5225798328751523
+  ],
+  "robot_yaw_rad": 0.3866340218997227,
+  "cloud": [],
+  "clusters": [
+    {
+      "label": 0,
+      "point_count": 37,
+      "centre_body": [
+        -0.218329524259332,
+        -0.28098273790145134
+      ],
+      "centre_ne": [
+        4.442069879574667,
+        1.166892633417846
+      ],
+      "distance_m": 0.3558357488531779,
+      "angle_rad": -2.2313678724085726,
+      "angle_deg": -127.84796163009719,
+      "min_distance_m": 0.33855299559064805,
+      "cluster_radius_m": 0.19245591945339247,
+      "cluster_size_m": 0.28638812049040063,
+      "equivalent_radius_m": 0.19245591945339247,
+      "influence_radius_m": 3.8491183890678493
+    }
+  ],
+  "tracks": [],
+  "virtual_obstacles": [],
+  "apf": {
+    "navigation_mode": "apf_colreg",
+    "encounter": "static_obstacle",
+    "colreg_rule": "none",
+    "side": -1.0,
+    "dcpa_m": null,
+    "tcpa_s": null,
+    "force_body": [
+      17.4423783140619,
+      2.138969970688903
+    ],
+    "repulsive_force_body": [
+      6.06244836884488,
+      6.488515530610754
+    ],
+    "attractive_force_body": [
+      11.379929945217022,
+      -4.349545559921851
+    ],
+    "target_ne": [
+      6.679287172458112,
+      3.0
+    ]
+  },
+  "apf_settings": {
+    "own_equivalent_radius_m": 0.3,
+    "safety_domain_m": 2.5,
+    "collision_horizon_s": 10.0,
+    "prediction_dt_s": 0.5,
+    "constant_descent_speed_m_s": 0.85,
+    "obstacle_ekf_prediction_enabled": false,
+    "obstacle_prediction_horizon_s": 5.0,
+    "obstacle_prediction_step_s": 0.5,
+    "dynamic_speed_enter_m_s": 0.06,
+    "dynamic_speed_exit_m_s": 0.04,
+    "prediction_min_samples": 6,
+    "prediction_min_time_span_s": 0.8,
+    "prediction_max_speed_std_m_s": 0.1,
+    "prediction_max_heading_var_rad2": 0.373156339238718,
+    "cluster_influence_scale": 20.0
+  },
+  "dbscan": {
+    "eps_m": 0.2,
+    "min_samples": 3
+  }
+}

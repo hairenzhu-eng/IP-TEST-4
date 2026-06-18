@@ -1,0 +1,79 @@
+{
+  "t": 32.214555978775024,
+  "timestamp_s": 1781813650.8695319,
+  "robot_pos": [
+    4.791719887685064,
+    1.6590894711298714
+  ],
+  "robot_yaw_rad": 0.43756693855769196,
+  "cloud": [],
+  "clusters": [
+    {
+      "label": 0,
+      "point_count": 30,
+      "centre_body": [
+        -0.533661840762162,
+        -0.3543231169650514
+      ],
+      "centre_ne": [
+        4.437557776247602,
+        1.0956265286341955
+      ],
+      "distance_m": 0.6405777325988539,
+      "angle_rad": -2.5554753399628187,
+      "angle_deg": -146.41795162962876,
+      "min_distance_m": 0.574927862758737,
+      "cluster_radius_m": 0.18806041506861398,
+      "cluster_size_m": 0.32013210237543804,
+      "equivalent_radius_m": 0.18806041506861398,
+      "influence_radius_m": 3.76120830137228
+    }
+  ],
+  "tracks": [],
+  "virtual_obstacles": [],
+  "apf": {
+    "navigation_mode": "apf_colreg",
+    "encounter": "static_obstacle",
+    "colreg_rule": "none",
+    "side": -1.0,
+    "dcpa_m": null,
+    "tcpa_s": null,
+    "force_body": [
+      12.249048952786236,
+      -5.047790954147297
+    ],
+    "repulsive_force_body": [
+      1.5854223863029855,
+      0.9017585068248641
+    ],
+    "attractive_force_body": [
+      10.66362656648325,
+      -5.949549460972161
+    ],
+    "target_ne": [
+      6.891719887685063,
+      3.0
+    ]
+  },
+  "apf_settings": {
+    "own_equivalent_radius_m": 0.3,
+    "safety_domain_m": 2.5,
+    "collision_horizon_s": 10.0,
+    "prediction_dt_s": 0.5,
+    "constant_descent_speed_m_s": 0.85,
+    "obstacle_ekf_prediction_enabled": false,
+    "obstacle_prediction_horizon_s": 5.0,
+    "obstacle_prediction_step_s": 0.5,
+    "dynamic_speed_enter_m_s": 0.06,
+    "dynamic_speed_exit_m_s": 0.04,
+    "prediction_min_samples": 6,
+    "prediction_min_time_span_s": 0.8,
+    "prediction_max_speed_std_m_s": 0.1,
+    "prediction_max_heading_var_rad2": 0.373156339238718,
+    "cluster_influence_scale": 20.0
+  },
+  "dbscan": {
+    "eps_m": 0.2,
+    "min_samples": 3
+  }
+}
