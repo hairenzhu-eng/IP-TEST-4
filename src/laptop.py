@@ -47,7 +47,7 @@ DOTG = 5
 # Obstacle ship EKF tracking and CPA switch.
 # True: enable EKF tracking, CPA, predicted trajectories, and virtual collision points.
 # False: use current LiDAR obstacles only; disable EKF tracking, CPA, and prediction.
-ENABLE_OBSTACLE_EKF_PREDICTION = False
+ENABLE_OBSTACLE_EKF_PREDICTION = True
 
 
 # define global functions
