@@ -1,0 +1,77 @@
+{
+  "t": 35.637887716293335,
+  "timestamp_s": 1781790648.2749615,
+  "robot_pos": [
+    5.076699320209799,
+    1.7435571956368534
+  ],
+  "robot_yaw_rad": 0.16385902464404142,
+  "cloud": [],
+  "clusters": [
+    {
+      "label": 0,
+      "point_count": 23,
+      "centre_body": [
+        -0.6816466190108589,
+        -0.6580391929035354
+      ],
+      "centre_ne": [
+        4.487173561290065,
+        0.9668939238331022
+      ],
+      "distance_m": 0.9474479893936507,
+      "angle_rad": -2.373814280456995,
+      "angle_deg": -136.00953961807014,
+      "min_distance_m": 0.8795576591896914,
+      "cluster_radius_m": 0.16473505069935604,
+      "cluster_size_m": 0.28653209644477495,
+      "equivalent_radius_m": 0.18
+    }
+  ],
+  "tracks": [],
+  "virtual_obstacles": [],
+  "apf": {
+    "navigation_mode": "apf_colreg",
+    "encounter": "static_obstacle",
+    "colreg_rule": "none",
+    "side": -1.0,
+    "dcpa_m": null,
+    "tcpa_s": null,
+    "force_body": [
+      12.025803233728265,
+      -3.0535424585625845
+    ],
+    "repulsive_force_body": [
+      0.2653105721119693,
+      0.48381563944497386
+    ],
+    "attractive_force_body": [
+      11.760492661616297,
+      -3.5373580980075587
+    ],
+    "target_ne": [
+      7.176699320209799,
+      3.0
+    ]
+  },
+  "apf_settings": {
+    "own_equivalent_radius_m": 0.3,
+    "safety_domain_m": 2.5,
+    "collision_horizon_s": 10.0,
+    "prediction_dt_s": 0.5,
+    "obstacle_ekf_prediction_enabled": false,
+    "obstacle_prediction_horizon_s": 5.0,
+    "obstacle_prediction_step_s": 0.5,
+    "dynamic_speed_enter_m_s": 0.06,
+    "dynamic_speed_exit_m_s": 0.04,
+    "prediction_min_samples": 6,
+    "prediction_min_time_span_s": 0.8,
+    "prediction_max_speed_std_m_s": 0.1,
+    "prediction_max_heading_var_rad2": 0.373156339238718,
+    "virtual_influence_scale": 5.0
+  },
+  "dbscan": {
+    "eps_m": 0.2,
+    "min_samples": 3
+  }
+}

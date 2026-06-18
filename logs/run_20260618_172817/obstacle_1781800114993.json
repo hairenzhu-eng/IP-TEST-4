@@ -1,0 +1,90 @@
+{
+  "t": 17.58285117149353,
+  "timestamp_s": 1781800114.9925227,
+  "robot_pos": [
+    2.0877666700120816,
+    1.7288135792390413
+  ],
+  "robot_yaw_rad": 0.2650031290076838,
+  "cloud": [
+    [
+      2.3091783224291444,
+      1.1779410802739645
+    ],
+    [
+      2.3160812250423017,
+      1.1788337947175707
+    ],
+    [
+      2.3230101909058867,
+      1.1797304102746509
+    ]
+  ],
+  "clusters": [
+    {
+      "label": 0,
+      "point_count": 25,
+      "centre_body": [
+        0.03228982622617089,
+        -0.5803736702004864
+      ],
+      "centre_ne": [
+        2.2413121866903545,
+        1.168997345688594
+      ],
+      "distance_m": 0.5812712189156618,
+      "angle_rad": -1.515217355799568,
+      "angle_deg": -86.81555953228766,
+      "min_distance_m": 0.570026974208468,
+      "cluster_radius_m": 0.08240001558379448,
+      "cluster_size_m": 0.16428291744693121,
+      "equivalent_radius_m": 0.18
+    }
+  ],
+  "tracks": [],
+  "virtual_obstacles": [],
+  "apf": {
+    "navigation_mode": "apf_colreg",
+    "encounter": "static_obstacle",
+    "colreg_rule": "none",
+    "side": -1.0,
+    "dcpa_m": null,
+    "tcpa_s": null,
+    "force_body": [
+      11.094306734428105,
+      -2.972462000243211
+    ],
+    "repulsive_force_body": [
+      -0.2809590433130831,
+      1.6161948899522274
+    ],
+    "attractive_force_body": [
+      11.375265777741188,
+      -4.5886568901954385
+    ],
+    "target_ne": [
+      4.187766670012081,
+      3.0
+    ]
+  },
+  "apf_settings": {
+    "own_equivalent_radius_m": 0.3,
+    "safety_domain_m": 2.5,
+    "collision_horizon_s": 10.0,
+    "prediction_dt_s": 0.5,
+    "obstacle_ekf_prediction_enabled": false,
+    "obstacle_prediction_horizon_s": 5.0,
+    "obstacle_prediction_step_s": 0.5,
+    "dynamic_speed_enter_m_s": 0.06,
+    "dynamic_speed_exit_m_s": 0.04,
+    "prediction_min_samples": 6,
+    "prediction_min_time_span_s": 0.8,
+    "prediction_max_speed_std_m_s": 0.1,
+    "prediction_max_heading_var_rad2": 0.373156339238718,
+    "virtual_influence_scale": 5.0
+  },
+  "dbscan": {
+    "eps_m": 0.2,
+    "min_samples": 3
+  }
+}

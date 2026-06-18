@@ -10,7 +10,6 @@ import numpy as np
 import json
 import os
 from datetime import datetime
-import argparse
 import time
 from pathlib import Path
 import subprocess
@@ -44,6 +43,11 @@ G = 2
 DOTN = 3
 DOTE = 4
 DOTG = 5
+
+# Obstacle ship EKF tracking and CPA switch.
+# True: enable EKF tracking, CPA, predicted trajectories, and virtual collision points.
+# False: use current LiDAR obstacles only; disable EKF tracking, CPA, and prediction.
+ENABLE_OBSTACLE_EKF_PREDICTION = False
 
 # define global functions
 def get_wifi_name():
@@ -125,27 +129,8 @@ def h_grate_update(x):
     return est_measurement, H 
 
 # main class
-def add_obstacle_ekf_prediction_args(parser):
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--ekf-prediction",
-        dest="obstacle_ekf_prediction_enabled",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Enable obstacle EKF future trajectory prediction.",
-    )
-    group.add_argument(
-        "--no-ekf-prediction",
-        dest="obstacle_ekf_prediction_enabled",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help="Disable obstacle EKF future trajectory prediction and APF virtual collision points.",
-    )
-    parser.set_defaults(obstacle_ekf_prediction_enabled=True)
-
-
 class LaptopController:
-    def __init__(self, OPERATING_MODE, obstacle_ekf_prediction_enabled=True):
+    def __init__(self, OPERATING_MODE):
         
         ########### DEFINE ARUCO MARKER ID ###################                     
         MARKER_ID = 24 # <<< CHANGE TO YOUR ROBOT'S ARUCO ID
@@ -181,7 +166,7 @@ class LaptopController:
 
         # store operating mode
         self.OPERATING_MODE = OPERATING_MODE
-        self.obstacle_ekf_prediction_enabled = bool(obstacle_ekf_prediction_enabled)
+        self.obstacle_ekf_prediction_enabled = ENABLE_OBSTACLE_EKF_PREDICTION
         Console.info(
             "Obstacle EKF prediction:",
             "enabled" if self.obstacle_ekf_prediction_enabled else "disabled",
@@ -318,7 +303,7 @@ class LaptopController:
         self.apf_clearance_gain = 2.3
         self.apf_collision_horizon_s = 6.0 if self.OPERATING_MODE != 2 else 10.0
         self.apf_prediction_dt_s = 0.5
-        self.apf_safety_domain_m = 1.4 if self.OPERATING_MODE == 2 else 1.2
+        self.apf_safety_domain_m = 2.5 if self.OPERATING_MODE == 2 else 1.2
         self.apf_too_close_m = 1.0 if self.OPERATING_MODE == 2 else 0.8
         self.apf_heading_gain = 0.9
         self.apf_heading_step_limit_rad = np.deg2rad(60.0)
@@ -336,7 +321,11 @@ class LaptopController:
         self.apf_colreg_dcpa_m = np.nan
         self.apf_colreg_tcpa_s = np.nan
         self.apf_colreg_active = False
-        self.apf_dynamic_speed_threshold_m_s = 0.03
+        # A target is only treated as dynamic after its EKF motion estimate has
+        # remained coherent for several observations.  The previous 0.03 m/s
+        # threshold allowed cluster jitter to change the COLREG encounter type.
+        self.apf_dynamic_speed_threshold_m_s = 0.06 if self.OPERATING_MODE == 2 else 0.05
+        self.apf_dynamic_exit_speed_threshold_m_s = 0.04 if self.OPERATING_MODE == 2 else 0.03
         self.apf_track_association_m = 0.80 if self.OPERATING_MODE == 2 else 0.60
         self.apf_track_timeout_s = 1.5 if self.OPERATING_MODE == 2 else 1.0
         self.apf_next_track_id = 1
@@ -350,6 +339,13 @@ class LaptopController:
         self.obstacle_prediction_step_s = 0.5
         self.obstacle_history_len = 60
         self.obstacle_stats_window_s = 2.5
+        self.obstacle_prediction_min_samples = 6
+        self.obstacle_prediction_min_hits = 6
+        self.obstacle_prediction_min_time_span_s = 0.8
+        self.obstacle_prediction_max_speed_std_m_s = 0.10
+        self.obstacle_prediction_max_heading_var_rad2 = np.deg2rad(35.0) ** 2
+        self.obstacle_prediction_accel_min_samples = 10
+        self.obstacle_prediction_max_accel_std_m_s2 = 0.25
         self.obstacle_min_equivalent_radius_m = 0.18 if self.OPERATING_MODE == 2 else 0.15
         self.obstacle_max_accel_m_s2 = 0.80 if self.OPERATING_MODE == 2 else 0.60
         self.apf_own_equivalent_radius_m = 0.30 if self.OPERATING_MODE == 2 else 0.25
@@ -571,25 +567,6 @@ class LaptopController:
         Console.info("Data saved in ",self.filename)
         self.r.sleep()
 
-    def set_obstacle_ekf_prediction_enabled(self, enabled):
-        self.obstacle_ekf_prediction_enabled = bool(enabled)
-        if not self.obstacle_ekf_prediction_enabled:
-            self.apf_virtual_obstacles = []
-            for track in getattr(self, "apf_obstacle_tracks", []):
-                track["prediction_model"] = "disabled"
-                track["prediction_ne"] = np.empty((0, 2), dtype=float)
-
-        Console.info(
-            "Obstacle EKF prediction:",
-            "enabled" if self.obstacle_ekf_prediction_enabled else "disabled",
-        )
-        return self.obstacle_ekf_prediction_enabled
-
-    def toggle_obstacle_ekf_prediction(self):
-        return self.set_obstacle_ekf_prediction_enabled(
-            not self.obstacle_ekf_prediction_enabled
-        )
-        
     ######## DEFINE CALLBACKS HERE ##################
     def imu_cb(self, msg: Vector3): 
         self.sensed_imu_yaw_rate_rad_s = msg.z
@@ -602,17 +579,6 @@ class LaptopController:
         self.robot_available = True
 
     def command_cb(self,msg: String):
-        command = str(msg.data).strip().lower().replace("-", "_")
-        if command in {"ekf_prediction on", "obstacle_ekf_prediction on", "prediction on"}:
-            self.set_obstacle_ekf_prediction_enabled(True)
-            return
-        if command in {"ekf_prediction off", "obstacle_ekf_prediction off", "prediction off"}:
-            self.set_obstacle_ekf_prediction_enabled(False)
-            return
-        if command in {"ekf_prediction toggle", "obstacle_ekf_prediction toggle", "prediction toggle"}:
-            self.toggle_obstacle_ekf_prediction()
-            return
-
         Console.info(f"Response from robot: {msg.data}")
 
     # ---------------- LiDAR callback ----------------
@@ -955,6 +921,12 @@ class LaptopController:
                 "obstacle_ekf_prediction_enabled": self.obstacle_ekf_prediction_enabled,
                 "obstacle_prediction_horizon_s": self.obstacle_prediction_horizon_s,
                 "obstacle_prediction_step_s": self.obstacle_prediction_step_s,
+                "dynamic_speed_enter_m_s": self.apf_dynamic_speed_threshold_m_s,
+                "dynamic_speed_exit_m_s": self.apf_dynamic_exit_speed_threshold_m_s,
+                "prediction_min_samples": self.obstacle_prediction_min_samples,
+                "prediction_min_time_span_s": self.obstacle_prediction_min_time_span_s,
+                "prediction_max_speed_std_m_s": self.obstacle_prediction_max_speed_std_m_s,
+                "prediction_max_heading_var_rad2": self.obstacle_prediction_max_heading_var_rad2,
                 "virtual_influence_scale": self.apf_virtual_influence_scale,
             },
             "dbscan": {
@@ -1087,6 +1059,66 @@ class LaptopController:
         corrected_covariance = correction @ covariance @ correction.T + kalman_gain @ R_obs @ kalman_gain.T
         return corrected_state, corrected_covariance
 
+    def obstacle_track_motion_is_stable(self, track):
+        sample_count = int(track.get("stats_sample_count", 0))
+        hit_count = int(track.get("hit_count", 0))
+        if (
+            sample_count < self.obstacle_prediction_min_samples
+            or hit_count < self.obstacle_prediction_min_hits
+            or int(track.get("miss_count", 0)) > 0
+        ):
+            return False
+
+        samples = track.get("motion_window", [])
+        if len(samples) < 2:
+            return False
+
+        first_stamp = float(samples[0].get("stamp_s", 0.0))
+        last_stamp = float(samples[-1].get("stamp_s", first_stamp))
+        if last_stamp - first_stamp < self.obstacle_prediction_min_time_span_s:
+            return False
+
+        speed_m_s = float(track.get("speed_mean_m_s", 0.0))
+        was_stable = bool(track.get("motion_stable", False))
+        speed_threshold = (
+            self.apf_dynamic_exit_speed_threshold_m_s
+            if was_stable
+            else self.apf_dynamic_speed_threshold_m_s
+        )
+        if not np.isfinite(speed_m_s) or speed_m_s < speed_threshold:
+            return False
+
+        speed_std_m_s = float(np.sqrt(max(float(track.get("speed_var_m2_s2", 0.0)), 0.0)))
+        if speed_std_m_s > self.obstacle_prediction_max_speed_std_m_s:
+            return False
+
+        heading_var_rad2 = float(track.get("heading_var_rad2", np.nan))
+        if (
+            not np.isfinite(heading_var_rad2)
+            or heading_var_rad2 > self.obstacle_prediction_max_heading_var_rad2
+        ):
+            return False
+
+        return True
+
+    def obstacle_track_prediction_accel_ne(self, track):
+        if (
+            not bool(track.get("motion_stable", False))
+            or int(track.get("stats_sample_count", 0)) < self.obstacle_prediction_accel_min_samples
+        ):
+            return np.zeros(2, dtype=float)
+
+        accel_ne = np.asarray(track.get("accel_ne", [0.0, 0.0]), dtype=float).reshape(2)
+        accel_var_ne = np.asarray(track.get("accel_var_ne", [np.inf, np.inf]), dtype=float).reshape(2)
+        if not np.isfinite(accel_ne).all() or not np.isfinite(accel_var_ne).all():
+            return np.zeros(2, dtype=float)
+
+        accel_std_m_s2 = float(np.sqrt(max(float(np.max(accel_var_ne)), 0.0)))
+        if accel_std_m_s2 > self.obstacle_prediction_max_accel_std_m_s2:
+            return np.zeros(2, dtype=float)
+
+        return accel_ne
+
     def obstacle_track_prediction_ne(self, track):
         if not self.obstacle_ekf_prediction_enabled:
             return np.empty((0, 2), dtype=float)
@@ -1099,9 +1131,7 @@ class LaptopController:
         if not np.isfinite(velocity_ne).all():
             velocity_ne = state[2:4]
 
-        accel_ne = np.asarray(track.get("accel_ne", [0.0, 0.0]), dtype=float).reshape(2)
-        if int(track.get("stats_sample_count", 0)) < 3 or not np.isfinite(accel_ne).all():
-            accel_ne = np.zeros(2, dtype=float)
+        accel_ne = self.obstacle_track_prediction_accel_ne(track)
 
         step_s = max(float(self.obstacle_prediction_step_s), 1e-3)
         horizon_s = max(float(self.obstacle_prediction_horizon_s), step_s)
@@ -1144,8 +1174,10 @@ class LaptopController:
             track["prediction_ne"] = np.empty((0, 2), dtype=float)
             return
 
-        if int(track.get("stats_sample_count", 0)) >= 3:
+        if np.linalg.norm(self.obstacle_track_prediction_accel_ne(track)) > 0.0:
             track["prediction_model"] = "sliding_window_acceleration"
+        elif bool(track.get("motion_stable", False)):
+            track["prediction_model"] = "stable_constant_velocity"
         else:
             track["prediction_model"] = "ekf_constant_velocity"
         track["prediction_ne"] = self.obstacle_track_prediction_ne(track)
@@ -1248,26 +1280,39 @@ class LaptopController:
             track["radius_var_m2"] = 0.0
             track["accel_ne"] = np.zeros(2, dtype=float)
             track["accel_var_ne"] = np.zeros(2, dtype=float)
+            track["motion_stable"] = False
             self.sync_obstacle_track_fields(track)
             return
 
         velocities = np.asarray([sample["vel_ne"] for sample in samples], dtype=float)
         finite_vel = np.isfinite(velocities).all(axis=1)
         velocities = velocities[finite_vel]
-        if len(velocities) > 0:
+        sample_times = np.asarray([float(sample.get("stamp_s", 0.0)) for sample in samples], dtype=float)
+        sample_positions = np.asarray([sample["pos_ne"] for sample in samples], dtype=float)
+        time_span_s = float(np.ptp(sample_times)) if len(sample_times) > 1 else 0.0
+        if len(samples) >= 3 and time_span_s >= 0.4:
+            centred_times = sample_times - float(np.mean(sample_times))
+            design = np.column_stack([centred_times, np.ones_like(centred_times)])
+            fit, _, _, _ = np.linalg.lstsq(design, sample_positions, rcond=None)
+            track["velocity_mean_ne"] = fit[0]
+        elif len(velocities) > 0:
             track["velocity_mean_ne"] = np.mean(velocities, axis=0)
-            track["velocity_var_ne"] = np.var(velocities, axis=0)
         else:
             track["velocity_mean_ne"] = np.asarray(track.get("vel_ne", [0.0, 0.0]), dtype=float).reshape(2)
+
+        if len(velocities) > 0:
+            track["velocity_var_ne"] = np.var(velocities, axis=0)
+        else:
             track["velocity_var_ne"] = np.zeros(2, dtype=float)
 
         speeds = np.asarray([sample["speed_m_s"] for sample in samples], dtype=float)
         speeds = speeds[np.isfinite(speeds)]
+        fitted_speed_m_s = float(np.linalg.norm(track["velocity_mean_ne"]))
         if len(speeds) > 0:
-            track["speed_mean_m_s"] = float(np.mean(speeds))
+            track["speed_mean_m_s"] = fitted_speed_m_s
             track["speed_var_m2_s2"] = float(np.var(speeds))
         else:
-            track["speed_mean_m_s"] = float(np.linalg.norm(track["velocity_mean_ne"]))
+            track["speed_mean_m_s"] = fitted_speed_m_s
             track["speed_var_m2_s2"] = 0.0
 
         headings = np.asarray([sample["heading_rad"] for sample in samples], dtype=float)
@@ -1323,6 +1368,7 @@ class LaptopController:
             track["accel_ne"] = np.zeros(2, dtype=float)
             track["accel_var_ne"] = np.zeros(2, dtype=float)
 
+        track["motion_stable"] = self.obstacle_track_motion_is_stable(track)
         self.sync_obstacle_track_fields(track)
 
     def annotate_lidar_obstacle_with_track(self, obstacle, track):
@@ -1343,6 +1389,7 @@ class LaptopController:
         obstacle["radius_var_m2"] = float(track.get("radius_var_m2", 0.0))
         obstacle["equivalent_radius_m"] = float(track.get("equivalent_radius_m", self.obstacle_min_equivalent_radius_m))
         obstacle["stats_sample_count"] = int(track.get("stats_sample_count", 0))
+        obstacle["motion_stable"] = bool(track.get("motion_stable", False))
         obstacle["prediction_model"] = track.get("prediction_model", "ekf_constant_velocity")
         obstacle["predicted_trajectory_ne"] = prediction_ne.tolist()
 
@@ -1354,6 +1401,34 @@ class LaptopController:
         ]
 
     def update_apf_obstacle_tracks(self, stamp_s):
+        if not self.obstacle_ekf_prediction_enabled:
+            self.apf_obstacle_tracks = []
+            self.apf_virtual_obstacles = []
+            tracked_fields = {
+                "track_id",
+                "velocity_ne",
+                "velocity_mean_ne",
+                "velocity_var_ne",
+                "accel_ne",
+                "speed_m_s",
+                "speed_mean_m_s",
+                "speed_var_m2_s2",
+                "heading_rad",
+                "heading_deg",
+                "heading_mean_rad",
+                "heading_var_rad2",
+                "radius_mean_m",
+                "radius_var_m2",
+                "stats_sample_count",
+                "motion_stable",
+                "prediction_model",
+                "predicted_trajectory_ne",
+            }
+            for obstacle in self.lidar_obstacles:
+                for field in tracked_fields:
+                    obstacle.pop(field, None)
+            return
+
         now = float(stamp_s if stamp_s is not None else time.time())
         detections = []
 
@@ -1454,6 +1529,9 @@ class LaptopController:
         self.prune_obstacle_tracks(now)
 
     def obstacle_track_visuals(self):
+        if not self.obstacle_ekf_prediction_enabled:
+            return []
+
         now = float(self.latest_lidar_received_s if self.latest_lidar_received_s is not None else time.time())
         visuals = []
 
@@ -1499,6 +1577,7 @@ class LaptopController:
                 "radius_var_m2": float(track.get("radius_var_m2", 0.0)),
                 "prediction_model": track.get("prediction_model", "ekf_constant_velocity"),
                 "stats_sample_count": int(track.get("stats_sample_count", 0)),
+                "motion_stable": bool(track.get("motion_stable", False)),
                 "hit_count": int(track.get("hit_count", 0)),
                 "miss_count": int(track.get("miss_count", 0)),
             })
@@ -1506,6 +1585,9 @@ class LaptopController:
         return visuals
 
     def apf_track_for_obstacle(self, obstacle):
+        if not self.obstacle_ekf_prediction_enabled:
+            return None
+
         centre_ne = np.asarray(obstacle.get("centre_ne", [np.nan, np.nan]), dtype=float).reshape(2)
         if not np.isfinite(centre_ne).all():
             return None
@@ -1536,6 +1618,9 @@ class LaptopController:
         return None
 
     def apf_cpa_metrics(self, obs_pos_body, obs_vel_body, own_vel_body):
+        if not self.obstacle_ekf_prediction_enabled:
+            return np.nan, np.nan
+
         rel_vel = np.asarray(obs_vel_body, dtype=float).reshape(2) - np.asarray(own_vel_body, dtype=float).reshape(2)
         obs_pos_body = np.asarray(obs_pos_body, dtype=float).reshape(2)
         rel_speed_sq = float(np.dot(rel_vel, rel_vel))
@@ -1584,13 +1669,7 @@ class LaptopController:
         if not np.isfinite(velocity_ne).all():
             velocity_ne = state[2:4].copy()
 
-        if int(track.get("stats_sample_count", 0)) >= 3:
-            accel_ne = np.asarray(track.get("accel_ne", [0.0, 0.0]), dtype=float).reshape(2)
-        else:
-            accel_ne = np.zeros(2, dtype=float)
-
-        if not np.isfinite(accel_ne).all():
-            accel_ne = np.zeros(2, dtype=float)
+        accel_ne = self.obstacle_track_prediction_accel_ne(track)
 
         pos_ne = state[0:2] + velocity_ne * dt_s + 0.5 * accel_ne * dt_s * dt_s
         vel_ne = velocity_ne + accel_ne * dt_s
@@ -1615,13 +1694,10 @@ class LaptopController:
         for track in self.apf_obstacle_tracks:
             if now - float(track.get("last_seen_s", track.get("stamp_s", now))) > self.apf_track_timeout_s:
                 continue
-            if int(track.get("hit_count", 0)) < 2:
+            if not self.obstacle_track_motion_is_stable(track):
                 continue
 
             speed_m_s = float(track.get("speed_mean_m_s", track.get("speed_m_s", 0.0)))
-            if speed_m_s < self.apf_dynamic_speed_threshold_m_s:
-                continue
-
             radius_m = float(track.get("radius_mean_m", track.get("radius_m", self.obstacle_min_equivalent_radius_m)))
             if not np.isfinite(radius_m) or radius_m <= 0.0:
                 radius_m = self.obstacle_min_equivalent_radius_m
@@ -1784,7 +1860,7 @@ class LaptopController:
         body_angle_rad = float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))
         return abs(wrap_angle(body_angle_rad)) <= self.apf_priority_front_half_angle_rad
 
-    def apf_lock_side(self, requested_side, obstacle_distance_m, allow_override=False):
+    def apf_lock_side(self, requested_side, obstacle_distance_m):
         now_s = float(self.timefromstart) if self.timefromstart is not None else 0.0
         obstacle_close = (
             np.isfinite(obstacle_distance_m)
@@ -1801,11 +1877,9 @@ class LaptopController:
             return 0.0
 
         requested_side = float(np.sign(requested_side))
-        lock_conflicts = self.apf_side_lock_sign != 0.0 and self.apf_side_lock_sign != requested_side
         if (
             self.apf_side_lock_sign != 0.0
             and (obstacle_close or now_s < self.apf_side_lock_until_s)
-            and not (allow_override and lock_conflicts)
         ):
             self.apf_side_lock_active = True
             return self.apf_side_lock_sign
@@ -1900,11 +1974,18 @@ class LaptopController:
 
         is_virtual = bool(obstacle.get("virtual", False))
         track = None if is_virtual else self.apf_track_for_obstacle(obstacle)
+        track_motion_stable = (
+            is_virtual
+            or (
+                track is not None
+                and self.obstacle_track_motion_is_stable(track)
+            )
+        )
         obs_vel_body = np.zeros(2, dtype=float)
         obstacle_velocity_ne = np.asarray(obstacle.get("velocity_ne", [np.nan, np.nan]), dtype=float).reshape(2)
-        if np.isfinite(obstacle_velocity_ne).all():
+        if track_motion_stable and np.isfinite(obstacle_velocity_ne).all():
             obs_vel_body = self.earth_vector_to_body(obstacle_velocity_ne)
-        elif track is not None and track.get("hit_count", 0) >= 2:
+        elif track_motion_stable and track is not None:
             track_velocity_ne = np.asarray(track.get("velocity_mean_ne", track["vel_ne"]), dtype=float).reshape(2)
             if not np.isfinite(track_velocity_ne).all():
                 track_velocity_ne = np.asarray(track["vel_ne"], dtype=float).reshape(2)
@@ -1947,7 +2028,7 @@ class LaptopController:
         requested_side = 0.0
         rule = "none"
         risk = False
-        if not is_virtual:
+        if not is_virtual and self.obstacle_ekf_prediction_enabled:
             tcpa_s, dcpa_m = self.apf_cpa_metrics(obs_pos_body, obs_vel_body, own_vel_body)
             encounter, requested_side, rule = self.apf_classify_encounter(obs_pos_body, obs_vel_body, own_vel_body)
             risk = (
@@ -1965,6 +2046,8 @@ class LaptopController:
                 self.apf_colreg_tcpa_s = tcpa_s
                 self.apf_colreg_active = False
                 return np.zeros(2, dtype=float), False
+        elif not is_virtual:
+            risk = distance_m <= self.apf_too_close_m
 
         goal_distance = max(float(np.linalg.norm(target_body)), 1e-3)
         target_dir = np.asarray(target_body, dtype=float).reshape(2) / goal_distance
@@ -1987,7 +2070,10 @@ class LaptopController:
                     pass_astern_active = False
                 else:
                     requested_side = float(obstacle.get("requested_side", 0.0))
-                    pass_astern_active = pass_astern_side != 0.0
+                    pass_astern_active = (
+                        encounter == "crossing_from_starboard"
+                        and pass_astern_side != 0.0
+                    )
                     if pass_astern_active:
                         requested_side = pass_astern_side
                         rule = "predicted collision point: pass astern"
@@ -2017,7 +2103,6 @@ class LaptopController:
             side_sign = self.apf_lock_side(
                 requested_side if (risk or in_front_sector) else 0.0,
                 distance_m,
-                allow_override=pass_astern_active,
             )
             proximity = max((rho0 - distance_m) / max(rho0, 1e-6), 0.0)
             if pass_astern_active:
@@ -2121,8 +2206,10 @@ class LaptopController:
                 any_repulsion = any_repulsion or active
 
         if any_repulsion and self.apf_side_lock_sign != 0.0:
+            # side_sign uses the COLREG convention used throughout this
+            # controller: +1 is port/left and -1 is starboard/right.
             route_normal_left_ne = np.array(
-                [-self.route_path_unit_ne[1], self.route_path_unit_ne[0]],
+                [self.route_path_unit_ne[1], -self.route_path_unit_ne[0]],
                 dtype=float,
             )
             offset_target_ne = target_ne + self.apf_side_lock_sign * self.apf_clearance_offset_m * route_normal_left_ne
@@ -2639,13 +2726,7 @@ class LaptopController:
         ############################# END MAIN LOOP ###########################
         
 def main():
-    parser = argparse.ArgumentParser()
-    add_obstacle_ekf_prediction_args(parser)
-    args = parser.parse_args()
-    LaptopController(
-        OPERATING_MODE=0,
-        obstacle_ekf_prediction_enabled=args.obstacle_ekf_prediction_enabled,
-    )
+    LaptopController(OPERATING_MODE=0)
     
 if __name__ == "__main__":
     main()
