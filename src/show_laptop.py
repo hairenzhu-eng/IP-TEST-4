@@ -13,7 +13,7 @@ import argparse
 import numpy as np
 from drivers.rpi import Rate
 
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import QWidget, QApplication, QGridLayout
 from pglive.sources.data_connector import DataConnector
 from pglive.sources.live_plot import LiveLinePlot
@@ -32,6 +32,7 @@ class ShowLaptop(QWidget):
         self.lastdt = 1/rate
 
         super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.rpmplot = LivePlotWidget()
         self.headingplot = LivePlotWidget()
         self.positionplot = LivePlotWidget()
@@ -44,7 +45,10 @@ class ShowLaptop(QWidget):
         layout.addWidget(self.timeplot, 2, 0, 1, 2)
         layout.addWidget(self.depthplot, 2, 3, 1, 2)
         self.loopcounter = 0
-        self.Laptop = lt.LaptopController(OPERATING_MODE)
+        self.Laptop = lt.LaptopController(
+            OPERATING_MODE,
+            obstacle_ekf_prediction_enabled=OBSTACLE_EKF_PREDICTION_ENABLED,
+        )
         self.obstacle_summary_signal.connect(self._set_obstacle_summary_title)
         
         # Create one curve pre dataset
@@ -168,6 +172,16 @@ class ShowLaptop(QWidget):
 
     def _set_obstacle_summary_title(self, summary):
         self.positionplot.setTitle(summary)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_P:
+            enabled = self.Laptop.toggle_obstacle_ekf_prediction()
+            state = "ON" if enabled else "OFF"
+            self.obstacle_summary_signal.emit(f"Obstacle EKF prediction: {state}")
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
         
         
     def _force_line_ne(self, force_body, scale=0.8):
@@ -387,14 +401,13 @@ class ShowLaptop(QWidget):
         
 if __name__ == '__main__':    
 
-    parser = argparse.ArgumentParser(
-            formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--simulation",
         action="store_true",
         help="Run in simulation mode. Defaults to False",
     )
+    lt.add_obstacle_ekf_prediction_args(parser)
 
     args = parser.parse_args()
 
@@ -404,6 +417,12 @@ if __name__ == '__main__':
     else: 
         OPERATING_MODE = 1
         print('Running laptop.py on robot')
+
+    OBSTACLE_EKF_PREDICTION_ENABLED = args.obstacle_ekf_prediction_enabled
+    print(
+        "Obstacle EKF prediction:",
+        "enabled" if OBSTACLE_EKF_PREDICTION_ENABLED else "disabled",
+    )
 
 
 

@@ -125,8 +125,27 @@ def h_grate_update(x):
     return est_measurement, H 
 
 # main class
+def add_obstacle_ekf_prediction_args(parser):
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--ekf-prediction",
+        dest="obstacle_ekf_prediction_enabled",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Enable obstacle EKF future trajectory prediction.",
+    )
+    group.add_argument(
+        "--no-ekf-prediction",
+        dest="obstacle_ekf_prediction_enabled",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="Disable obstacle EKF future trajectory prediction and APF virtual collision points.",
+    )
+    parser.set_defaults(obstacle_ekf_prediction_enabled=True)
+
+
 class LaptopController:
-    def __init__(self, OPERATING_MODE):
+    def __init__(self, OPERATING_MODE, obstacle_ekf_prediction_enabled=True):
         
         ########### DEFINE ARUCO MARKER ID ###################                     
         MARKER_ID = 24 # <<< CHANGE TO YOUR ROBOT'S ARUCO ID
@@ -162,11 +181,19 @@ class LaptopController:
 
         # store operating mode
         self.OPERATING_MODE = OPERATING_MODE
+        self.obstacle_ekf_prediction_enabled = bool(obstacle_ekf_prediction_enabled)
+        Console.info(
+            "Obstacle EKF prediction:",
+            "enabled" if self.obstacle_ekf_prediction_enabled else "disabled",
+        )
 
         ########### INITIALISE DATA LOGS ###################                     
         filename_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.filename = Path("logs/log_" + filename_time + ".csv")
-        self.filename.parent.mkdir(parents=True, exist_ok=True)
+        self.run_dir = Path("logs/run_" + filename_time)
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.filename = self.run_dir / f"log_{filename_time}.csv"
+        self.obstacle_log_dir = self.run_dir
+        self.last_obstacle_snapshot_stamp_s = None
         
         with self.filename.open('w') as f:
             f.write("EpochTime(s),TimeFromStart(s),right_prop_rate(rad/s),left_prop_rate(rad/s),LastDT(s),Yaw(rad),North(m),East(m),IMUSensedYawRate(rad/s),IMUIntegratedYaw(rad),IMUSensedTimeStamp(s),ARUCOSensedNorth(m),ARUCOSensedEast(m),ARUCOSensedYaw(rad),ArucoSensedTimeStamp(s),DepthTimeStamp(s),Depth(m),NavigationMode,APFEncounter,APFSide,APFDCPA(m),APFTCPA(s),APFForceX,APFForceY,NearestObstacleNorth(m),NearestObstacleEast(m),NearestObstacleDistance(m)\n")
@@ -264,7 +291,7 @@ class LaptopController:
         else:
             self.route_path_unit_ne = np.array([1.0, 0.0], dtype=float)
         self.route_heading_rad = float(np.arctan2(self.route_path_unit_ne[1], self.route_path_unit_ne[0]))
-        self.route_tracking_speed_m_s = 0.55 if self.OPERATING_MODE == 2 else 0.35
+        self.route_tracking_speed_m_s = 0.85 if self.OPERATING_MODE == 2 else 0.35
         self.route_tracking_lookahead_m = 1.0 if self.OPERATING_MODE == 2 else 0.7
         self.final_approach_distance_m = 1.0 if self.OPERATING_MODE == 2 else 0.7
         self.final_slowdown_distance_m = 1.0 if self.OPERATING_MODE == 2 else 0.8
@@ -326,7 +353,7 @@ class LaptopController:
         self.obstacle_min_equivalent_radius_m = 0.18 if self.OPERATING_MODE == 2 else 0.15
         self.obstacle_max_accel_m_s2 = 0.80 if self.OPERATING_MODE == 2 else 0.60
         self.apf_own_equivalent_radius_m = 0.30 if self.OPERATING_MODE == 2 else 0.25
-        self.apf_virtual_influence_scale = 3.0
+        self.apf_virtual_influence_scale = 5.0
         self.apf_virtual_repulsive_gain = 0.12
         self.apf_side_lock_sign = 0.0
         self.apf_side_lock_until_s = 0.0
@@ -415,8 +442,9 @@ class LaptopController:
         self.kn = None 
         self.kg = None
         
-        self.v_max = 0.35 #fastest the robot can go # 0.2
-        self.w_max = np.deg2rad(30) #fastest the robot can turn # 30
+        self.v_max = 0.85 #fastest the robot can go # 0.2
+        self.w_max = np.deg2rad(80) #fastest the robot can turn # 30
+        self.prop_rate_limit_rad_s = 200.0
         # setup a contranor to store controls
         self.U = Vector(2).T
         ################################################################
@@ -503,7 +531,7 @@ class LaptopController:
             time.sleep(5.0)
         else: # WEBOTS create fake ARUCO logs
             self.sensed_imu_stamp_s = 0 
-            self.groundtruth_log = Path("logs/log_" + filename_time + "_pseudo_aruco.csv")
+            self.groundtruth_log = self.run_dir / f"log_{filename_time}_pseudo_aruco.csv"
             with self.groundtruth_log.open('w') as f:
                 f.write("epoch [s],elapsed [s],x [m],y [m],z [m],roll [deg],pitch [deg],yaw [deg],broadcast\n")
 
@@ -542,6 +570,25 @@ class LaptopController:
         Console.info("Thrusters stopped")
         Console.info("Data saved in ",self.filename)
         self.r.sleep()
+
+    def set_obstacle_ekf_prediction_enabled(self, enabled):
+        self.obstacle_ekf_prediction_enabled = bool(enabled)
+        if not self.obstacle_ekf_prediction_enabled:
+            self.apf_virtual_obstacles = []
+            for track in getattr(self, "apf_obstacle_tracks", []):
+                track["prediction_model"] = "disabled"
+                track["prediction_ne"] = np.empty((0, 2), dtype=float)
+
+        Console.info(
+            "Obstacle EKF prediction:",
+            "enabled" if self.obstacle_ekf_prediction_enabled else "disabled",
+        )
+        return self.obstacle_ekf_prediction_enabled
+
+    def toggle_obstacle_ekf_prediction(self):
+        return self.set_obstacle_ekf_prediction_enabled(
+            not self.obstacle_ekf_prediction_enabled
+        )
         
     ######## DEFINE CALLBACKS HERE ##################
     def imu_cb(self, msg: Vector3): 
@@ -555,6 +602,17 @@ class LaptopController:
         self.robot_available = True
 
     def command_cb(self,msg: String):
+        command = str(msg.data).strip().lower().replace("-", "_")
+        if command in {"ekf_prediction on", "obstacle_ekf_prediction on", "prediction on"}:
+            self.set_obstacle_ekf_prediction_enabled(True)
+            return
+        if command in {"ekf_prediction off", "obstacle_ekf_prediction off", "prediction off"}:
+            self.set_obstacle_ekf_prediction_enabled(False)
+            return
+        if command in {"ekf_prediction toggle", "obstacle_ekf_prediction toggle", "prediction toggle"}:
+            self.toggle_obstacle_ekf_prediction()
+            return
+
         Console.info(f"Response from robot: {msg.data}")
 
     # ---------------- LiDAR callback ----------------
@@ -829,6 +887,86 @@ class LaptopController:
         close_count = int(np.sum(front_ranges < self.front_block_threshold))
         return close_count >= self.min_front_close_beams
 
+    def json_safe(self, value):
+        if value is None:
+            return None
+
+        if isinstance(value, (str, bool)):
+            return value
+
+        if isinstance(value, np.ndarray):
+            return self.json_safe(value.tolist())
+
+        if isinstance(value, np.generic):
+            return self.json_safe(value.item())
+
+        if isinstance(value, int):
+            return value
+
+        if isinstance(value, float):
+            if not np.isfinite(value):
+                return None
+            return value
+
+        if isinstance(value, dict):
+            return {str(key): self.json_safe(item) for key, item in value.items()}
+
+        if isinstance(value, (list, tuple)):
+            return [self.json_safe(item) for item in value]
+
+        return value
+
+    def write_obstacle_snapshot(self):
+        stamp_s = self.latest_lidar_received_s
+        if stamp_s is None:
+            return
+
+        stamp_s = float(stamp_s)
+        if self.last_obstacle_snapshot_stamp_s == stamp_s:
+            return
+
+        self.last_obstacle_snapshot_stamp_s = stamp_s
+        payload = {
+            "t": self.timefromstart,
+            "timestamp_s": stamp_s,
+            "robot_pos": [self.North, self.East],
+            "robot_yaw_rad": self.Yaw,
+            "cloud": self.lidar_data if self.lidar_data is not None else [],
+            "clusters": self.lidar_obstacles,
+            "tracks": self.obstacle_track_visuals(),
+            "virtual_obstacles": self.apf_virtual_obstacles,
+            "apf": {
+                "navigation_mode": self.navigation_mode,
+                "encounter": self.apf_encounter_mode,
+                "colreg_rule": self.apf_colreg_rule,
+                "side": self.apf_avoidance_side_sign,
+                "dcpa_m": self.apf_colreg_dcpa_m,
+                "tcpa_s": self.apf_colreg_tcpa_s,
+                "force_body": self.apf_force_body,
+                "repulsive_force_body": self.apf_repulsive_force_body,
+                "attractive_force_body": self.apf_attractive_force_body,
+                "target_ne": self.apf_target_ne,
+            },
+            "apf_settings": {
+                "own_equivalent_radius_m": self.apf_own_equivalent_radius_m,
+                "safety_domain_m": self.apf_safety_domain_m,
+                "collision_horizon_s": self.apf_collision_horizon_s,
+                "prediction_dt_s": self.apf_prediction_dt_s,
+                "obstacle_ekf_prediction_enabled": self.obstacle_ekf_prediction_enabled,
+                "obstacle_prediction_horizon_s": self.obstacle_prediction_horizon_s,
+                "obstacle_prediction_step_s": self.obstacle_prediction_step_s,
+                "virtual_influence_scale": self.apf_virtual_influence_scale,
+            },
+            "dbscan": {
+                "eps_m": self.lidar_dbscan_eps_m,
+                "min_samples": self.lidar_dbscan_min_points,
+            },
+        }
+
+        filename = f"obstacle_{int(round(stamp_s * 1000.0))}.json"
+        with (self.obstacle_log_dir / filename).open("w") as f:
+            json.dump(self.json_safe(payload), f, indent=2)
+
     # ---------------- COLREGS-compliant modified APF ----------------
     def reset_apf_diagnostics(self, clear_visual=True):
         if clear_visual:
@@ -950,6 +1088,9 @@ class LaptopController:
         return corrected_state, corrected_covariance
 
     def obstacle_track_prediction_ne(self, track):
+        if not self.obstacle_ekf_prediction_enabled:
+            return np.empty((0, 2), dtype=float)
+
         state = np.asarray(track.get("state", [np.nan, np.nan, 0.0, 0.0]), dtype=float).reshape(4)
         if not np.isfinite(state).all():
             return np.empty((0, 2), dtype=float)
@@ -997,6 +1138,11 @@ class LaptopController:
         else:
             track["heading_rad"] = np.nan
             track["heading_deg"] = np.nan
+
+        if not self.obstacle_ekf_prediction_enabled:
+            track["prediction_model"] = "disabled"
+            track["prediction_ne"] = np.empty((0, 2), dtype=float)
+            return
 
         if int(track.get("stats_sample_count", 0)) >= 3:
             track["prediction_model"] = "sliding_window_acceleration"
@@ -1452,6 +1598,9 @@ class LaptopController:
 
     def update_apf_virtual_obstacles(self):
         self.apf_virtual_obstacles = []
+        if not self.obstacle_ekf_prediction_enabled:
+            return self.apf_virtual_obstacles
+
         now = float(self.latest_lidar_received_s if self.latest_lidar_received_s is not None else time.time())
         own_pos_ne = np.array([float(self.North), float(self.East)], dtype=float)
         own_vel_ne = self.own_prediction_velocity_ne()
@@ -2201,6 +2350,67 @@ class LaptopController:
 
        return predicted_state, F
 
+    def thruster_force_limits(self):
+        max_rpm = self.prop_rate_limit_rad_s * 60.0 / (2.0 * np.pi)
+        forward_force = float(rpm2N(max_rpm))
+        reverse_force = float(rpm2N(-max_rpm))
+
+        if not np.isfinite(forward_force) or forward_force <= 0.0:
+            forward_force = 1.0
+
+        if not np.isfinite(reverse_force) or reverse_force >= 0.0:
+            reverse_force = -0.5 * forward_force
+
+        return reverse_force, forward_force
+
+    def allocate_propulsion_rates(self, v_cmd, w_cmd):
+        v_cmd = float(v_cmd) if np.isfinite(v_cmd) else 0.0
+        w_cmd = float(w_cmd) if np.isfinite(w_cmd) else 0.0
+        v_cmd = max(v_cmd, 0.0)
+
+        desired_force_x = self.robot.k_drag * v_cmd * abs(v_cmd)
+        desired_tau_z = self.robot.B_66 * w_cmd
+        reverse_force, forward_force = self.thruster_force_limits()
+
+        yaw_arm = 0.5 * (float(self.G[2, 0]) - float(self.G[2, 1]))
+        if abs(yaw_arm) < 1e-6:
+            thrust = np.linalg.pinv(self.G) @ l2m([desired_force_x, 0.0, desired_tau_z])
+            right_force = float(np.clip(thrust[0, 0], reverse_force, forward_force))
+            left_force = float(np.clip(thrust[1, 0], reverse_force, forward_force))
+        else:
+            # Preserve yaw authority first. If the requested surge and yaw cannot
+            # both fit within the prop limits, reduce surge instead of losing turn.
+            desired_delta = desired_tau_z / yaw_arm
+            max_delta = max(forward_force - reverse_force, 1e-6)
+            delta = float(np.clip(desired_delta, -max_delta, max_delta))
+
+            force_lower = max(
+                0.0,
+                2.0 * reverse_force - delta,
+                2.0 * reverse_force + delta,
+            )
+            force_upper = min(
+                2.0 * forward_force - delta,
+                2.0 * forward_force + delta,
+            )
+
+            if force_upper < force_lower:
+                force_x = max(0.0, min(desired_force_x, 2.0 * forward_force))
+            else:
+                force_x = float(np.clip(desired_force_x, force_lower, force_upper))
+
+            right_force = 0.5 * (force_x + delta)
+            left_force = 0.5 * (force_x - delta)
+            right_force = float(np.clip(right_force, reverse_force, forward_force))
+            left_force = float(np.clip(left_force, reverse_force, forward_force))
+
+        rpm_R = -N2rpm(right_force)
+        rpm_L = N2rpm(left_force)
+
+        right_rate = float(np.clip(rpm_R * (2.0 * np.pi / 60.0), -self.prop_rate_limit_rad_s, self.prop_rate_limit_rad_s))
+        left_rate = float(np.clip(rpm_L * (2.0 * np.pi / 60.0), -self.prop_rate_limit_rad_s, self.prop_rate_limit_rad_s))
+        return right_rate, left_rate
+
     def empty_measurement(x):
         H = Matrix(5)
         return x, H
@@ -2376,14 +2586,7 @@ class LaptopController:
                 self.right_rate = 0.0
                 self.left_rate = 0.0
             else:
-                F_x = self.robot.k_drag * v * abs(v)
-                tau_z = self.robot.B_66 * w
-                thrust = np.linalg.pinv(self.G) @ l2m([F_x, 0, tau_z])
-                rpm_R = -N2rpm(thrust[0][0])
-                rpm_L = N2rpm(thrust[1][0])
-
-                self.right_rate = float(np.clip(rpm_R * (2 * np.pi / 60), -200, 200))
-                self.left_rate = float(np.clip(rpm_L * (2 * np.pi / 60), -200, 200))
+                self.right_rate, self.left_rate = self.allocate_propulsion_rates(v, w)
 
             control_msg = Vector3()
             control_msg.x = int(self.right_rate)
@@ -2423,6 +2626,7 @@ class LaptopController:
         ### LOG DATA ##############################
         with self.filename.open("a") as f:
             f.write(f"{current_epoch_s},{self.timefromstart},{self.right_rate},{self.left_rate},{self.lastdt},{self.Yaw},{self.North},{self.East},{self.sensed_yaw_rate},{self.integrated_yaw},{self.sensed_imu_stamp_s},{self.sensed_pos_northings_m},{self.sensed_pos_eastings_m},{self.sensed_pos_yaw_rad}, {self.sensed_pos_stamp_s}, {self.sensed_bottom_depth_stamp_s},{self.sensed_bottom_depth_m},{self.navigation_mode},{self.apf_encounter_mode},{self.apf_avoidance_side_sign},{self.apf_colreg_dcpa_m},{self.apf_colreg_tcpa_s},{self.apf_force_body[0]},{self.apf_force_body[1]},{nearest_obstacle_north},{nearest_obstacle_east},{nearest_obstacle_distance}\n")
+        self.write_obstacle_snapshot()
         
         ### VISUALISE DATA ##############################
         if self.OPERATING_MODE != 0:
@@ -2435,7 +2639,13 @@ class LaptopController:
         ############################# END MAIN LOOP ###########################
         
 def main():
-    LaptopController(OPERATING_MODE = 0)
+    parser = argparse.ArgumentParser()
+    add_obstacle_ekf_prediction_args(parser)
+    args = parser.parse_args()
+    LaptopController(
+        OPERATING_MODE=0,
+        obstacle_ekf_prediction_enabled=args.obstacle_ekf_prediction_enabled,
+    )
     
 if __name__ == "__main__":
     main()
