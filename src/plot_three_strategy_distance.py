@@ -53,7 +53,9 @@ OBSTACLE_EAST_COLUMNS = (
 
 MATCHED_SETTING_KEYS = (
     "own_equivalent_radius_m",
-    "safety_domain_m",
+    "dcpa_cluster_scale",
+    "too_close_cluster_scale",
+    "cluster_influence_scale",
     "collision_horizon_s",
     "prediction_dt_s",
     "constant_descent_speed_m_s",
@@ -367,12 +369,23 @@ def read_snapshot_metadata(
     if any(bool(value) != bool(ekf_values[0]) for value in ekf_values[1:]):
         raise ValueError("EKF state changes within the run")
 
-    safety_values = [
-        parse_float(settings.get("safety_domain_m"))
-        for settings in sampled_settings
-    ]
+    safety_values = []
+    for settings in sampled_settings:
+        safety_distance_m = parse_float(settings.get("safety_domain_m"))
+        if not np.isfinite(safety_distance_m):
+            safety_distance_m = parse_float(
+                settings.get("reference_dcpa_threshold_m")
+            )
+        if not np.isfinite(safety_distance_m):
+            dcpa_scale = parse_float(settings.get("dcpa_cluster_scale"))
+            minimum_radius_m = parse_float(
+                settings.get("obstacle_min_equivalent_radius_m")
+            )
+            if np.isfinite(dcpa_scale) and np.isfinite(minimum_radius_m):
+                safety_distance_m = dcpa_scale * minimum_radius_m
+        safety_values.append(safety_distance_m)
     if not all(np.isfinite(value) and value > 0.0 for value in safety_values):
-        raise ValueError("No valid safety_domain_m value")
+        raise ValueError("No valid DCPA threshold metadata")
     if any(
         not np.isclose(value, safety_values[0]) for value in safety_values[1:]
     ):

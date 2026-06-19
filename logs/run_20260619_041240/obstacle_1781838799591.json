@@ -1,0 +1,177 @@
+{
+  "t": 39.134963512420654,
+  "timestamp_s": 1781838799.5910318,
+  "robot_pos": [
+    3.3913944912624516,
+    1.6297188195287737
+  ],
+  "robot_yaw_rad": 5.08694018313909,
+  "cloud": [
+    [
+      4.636119553951999,
+      0.9774763659381859
+    ],
+    [
+      4.632719342780742,
+      0.9953791933484486
+    ],
+    [
+      4.6293670136994285,
+      1.0130018415688982
+    ],
+    [
+      4.6260670881463675,
+      1.0303526428360863
+    ],
+    [
+      4.622821724888698,
+      1.0474407771961343
+    ],
+    [
+      4.619631007548181,
+      1.0642760160806208
+    ],
+    [
+      4.627477573728917,
+      1.076810538019714
+    ],
+    [
+      4.610910750777334,
+      1.09811717580169
+    ],
+    [
+      4.608213081656765,
+      1.1141039803692188
+    ],
+    [
+      4.6057859188015025,
+      1.129811739454632
+    ],
+    [
+      4.60362057197942,
+      1.1452598693113287
+    ],
+    [
+      4.6017062686671935,
+      1.160467629781376
+    ],
+    [
+      4.600035297258001,
+      1.1754525203711066
+    ],
+    [
+      4.593147988240404,
+      1.1917545070105113
+    ],
+    [
+      4.591918210851649,
+      1.2062812417684166
+    ],
+    [
+      4.614660091010659,
+      1.2145899933382642
+    ],
+    [
+      4.616138236953712,
+      1.228525199637482
+    ],
+    [
+      4.669660789959658,
+      1.2304560675163998
+    ],
+    [
+      4.7299196243707105,
+      1.2321531321933967
+    ],
+    [
+      4.735758531774097,
+      1.246420265485062
+    ]
+  ],
+  "clusters": [
+    {
+      "label": 0,
+      "point_count": 20,
+      "centre_body": [
+        0.9403544009607133,
+        0.8999804666487895
+      ],
+      "centre_ne": [
+        4.628783933352272,
+        1.1289065348513487
+      ],
+      "distance_m": 1.3016263825520575,
+      "angle_rad": 0.7634633189959648,
+      "angle_deg": 43.743225991518834,
+      "min_distance_m": 1.2406703105906594,
+      "cluster_radius_m": 0.15891205616618195,
+      "cluster_size_m": 0.31196958714870465,
+      "equivalent_radius_m": 0.18,
+      "safety_radius_m": 1.08,
+      "influence_radius_m": 1.08,
+      "activation_radius_m": 1.8,
+      "dcpa_threshold_m": 1.08,
+      "too_close_threshold_m": 0.44999999999999996
+    }
+  ],
+  "tracks": [],
+  "virtual_obstacles": [],
+  "apf": {
+    "navigation_mode": "apf_avoid",
+    "encounter": "none",
+    "colreg_rule": "none",
+    "side": 0.0,
+    "dcpa_m": null,
+    "tcpa_s": null,
+    "force_body": [
+      2.3351812359521986,
+      -1.6002353195515813
+    ],
+    "repulsive_force_body": [
+      -9.982139400599149,
+      -9.168582469877403
+    ],
+    "attractive_force_body": [
+      12.317320636551347,
+      7.568347150325822
+    ],
+    "target_ne": [
+      5.491394491262452,
+      0.04890653485134866
+    ],
+    "overtaking_active": false,
+    "overtaking_track_id": null
+  },
+  "apf_settings": {
+    "own_equivalent_radius_m": 0.3,
+    "dcpa_cluster_scale": 6.0,
+    "too_close_cluster_scale": 2.5,
+    "reference_dcpa_threshold_m": 1.08,
+    "obstacle_min_equivalent_radius_m": 0.18,
+    "collision_horizon_s": 10.0,
+    "prediction_dt_s": 0.1,
+    "constant_descent_speed_m_s": 0.85,
+    "obstacle_ekf_prediction_enabled": false,
+    "obstacle_prediction_horizon_s": 5.0,
+    "obstacle_prediction_step_s": 0.5,
+    "dynamic_speed_enter_m_s": 0.06,
+    "dynamic_speed_exit_m_s": 0.04,
+    "prediction_min_samples": 2,
+    "prediction_min_time_span_s": 0.15,
+    "prediction_max_speed_std_m_s": 0.1,
+    "prediction_max_heading_var_rad2": 0.373156339238718,
+    "cluster_influence_scale": 6.0,
+    "direction_decision_cluster_scale": 14.0,
+    "safety_activation_margin_cluster_scale": 4.0,
+    "side_lock_exit_margin_cluster_scale": 1.2,
+    "overtaking_speed_scale": 1.35,
+    "overtaking_min_speed_scale": 0.85,
+    "overtaking_yaw_rate_limit_rad_s": 0.5235987755982988,
+    "overtaking_route_lead_margin_m": 0.2,
+    "overtaking_completion_hold_s": 0.4
+  },
+  "dbscan": {
+    "eps_m": 0.2,
+    "min_samples": 3
+  }
+}

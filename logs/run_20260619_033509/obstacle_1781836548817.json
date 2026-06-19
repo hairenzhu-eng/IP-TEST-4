@@ -1,0 +1,89 @@
+{
+  "t": 39.76243734359741,
+  "timestamp_s": 1781836548.8174717,
+  "robot_pos": [
+    3.584222514233272,
+    2.27644959211506
+  ],
+  "robot_yaw_rad": 1.4792283711670446,
+  "cloud": [],
+  "clusters": [
+    {
+      "label": 0,
+      "point_count": 16,
+      "centre_body": [
+        -1.0177916566628398,
+        -0.7049687804286024
+      ],
+      "centre_ne": [
+        4.193170968924144,
+        1.198459509933838
+      ],
+      "distance_m": 1.2380956496779556,
+      "angle_rad": -2.535819688333942,
+      "angle_deg": -145.29176574771466,
+      "min_distance_m": 1.1672201947019603,
+      "cluster_radius_m": 0.2027147496816172,
+      "cluster_size_m": 0.3068663809843609,
+      "equivalent_radius_m": 0.2027147496816172,
+      "safety_radius_m": 1.2162884980897033,
+      "influence_radius_m": 1.2162884980897033,
+      "activation_radius_m": 2.027147496816172,
+      "dcpa_threshold_m": 1.2162884980897033,
+      "too_close_threshold_m": 0.506786874204043
+    }
+  ],
+  "tracks": [],
+  "virtual_obstacles": [],
+  "apf": {
+    "navigation_mode": "apf_avoid",
+    "encounter": "none",
+    "colreg_rule": "none",
+    "side": 0.0,
+    "dcpa_m": null,
+    "tcpa_s": null,
+    "force_body": [
+      3.0178655038827333,
+      -3.2529178692765335
+    ],
+    "repulsive_force_body": [
+      14.076165858311942,
+      9.361099017307517
+    ],
+    "attractive_force_body": [
+      -11.058300354429209,
+      -12.61401688658405
+    ],
+    "target_ne": [
+      5.684222514233272,
+      0.06455889537157389
+    ]
+  },
+  "apf_settings": {
+    "own_equivalent_radius_m": 0.3,
+    "dcpa_cluster_scale": 6.0,
+    "too_close_cluster_scale": 2.5,
+    "reference_dcpa_threshold_m": 1.08,
+    "obstacle_min_equivalent_radius_m": 0.18,
+    "collision_horizon_s": 10.0,
+    "prediction_dt_s": 0.1,
+    "constant_descent_speed_m_s": 0.85,
+    "obstacle_ekf_prediction_enabled": false,
+    "obstacle_prediction_horizon_s": 5.0,
+    "obstacle_prediction_step_s": 0.5,
+    "dynamic_speed_enter_m_s": 0.06,
+    "dynamic_speed_exit_m_s": 0.04,
+    "prediction_min_samples": 2,
+    "prediction_min_time_span_s": 0.15,
+    "prediction_max_speed_std_m_s": 0.1,
+    "prediction_max_heading_var_rad2": 0.373156339238718,
+    "cluster_influence_scale": 6.0,
+    "direction_decision_cluster_scale": 14.0,
+    "safety_activation_margin_cluster_scale": 4.0,
+    "side_lock_exit_margin_cluster_scale": 1.2
+  },
+  "dbscan": {
+    "eps_m": 0.2,
+    "min_samples": 3
+  }
+}

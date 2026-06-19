@@ -27,7 +27,7 @@ class ShowLaptop(QWidget):
 
     def __init__(self, parent=None):
 
-        rate = 5.0
+        rate = 10.0
         self.r = Rate(rate)
         self.lastdt = 1/rate
 
@@ -65,6 +65,8 @@ class ShowLaptop(QWidget):
         apfSteeringPlot = LiveLinePlot(pen = 'cyan', name = 'APF Steering Force')
         apfTargetPlot = LiveScatterPlot(symbol = 't', size = 10, pen = 'orange', name = 'APF Target')
         obstacleEkfPositionPlot = LiveScatterPlot(symbol = 'o', size = 8, pen = 'orange', name = 'Obstacle EKF Position')
+        obstacleVirtualPositionPlot = LiveScatterPlot(symbol = 'x', size = 12, pen = 'magenta', name = 'Obstacle Predicted Position')
+        virtualCollisionPositionPlot = LiveScatterPlot(symbol = 'd', size = 14, pen = 'yellow', name = 'Virtual Collision Position')
         obstacleEkfHistoryPlot = LiveLinePlot(pen = 'green', name = 'Obstacle EKF Track')
         obstacleEkfPredictionPlot = LiveLinePlot(pen = 'orange', name = 'Obstacle EKF Prediction')
         obstacleEkfDirectionPlot = LiveLinePlot(pen = 'red', name = 'Obstacle Direction')
@@ -93,6 +95,8 @@ class ShowLaptop(QWidget):
         self.apf_steering = DataConnector(apfSteeringPlot, max_points=2)
         self.apf_target = DataConnector(apfTargetPlot, max_points=1)
         self.obstacle_ekf_position = DataConnector(obstacleEkfPositionPlot, max_points=50)
+        self.obstacle_virtual_position = DataConnector(obstacleVirtualPositionPlot, max_points=50)
+        self.virtual_collision_position = DataConnector(virtualCollisionPositionPlot, max_points=50)
         self.obstacle_ekf_history = DataConnector(obstacleEkfHistoryPlot, max_points=3000)
         self.obstacle_ekf_prediction = DataConnector(obstacleEkfPredictionPlot, max_points=1000)
         self.obstacle_ekf_direction = DataConnector(obstacleEkfDirectionPlot, max_points=200)
@@ -145,6 +149,8 @@ class ShowLaptop(QWidget):
         self.positionplot.addItem(apfSteeringPlot)
         self.positionplot.addItem(apfTargetPlot)
         self.positionplot.addItem(obstacleEkfPositionPlot)
+        self.positionplot.addItem(obstacleVirtualPositionPlot)
+        self.positionplot.addItem(virtualCollisionPositionPlot)
         self.positionplot.addItem(obstacleEkfHistoryPlot)
         self.positionplot.addItem(obstacleEkfPredictionPlot)
         self.positionplot.addItem(obstacleEkfDirectionPlot)
@@ -234,6 +240,8 @@ class ShowLaptop(QWidget):
         tracks = self.Laptop.obstacle_track_visuals()
         position_northings = []
         position_eastings = []
+        virtual_northings = []
+        virtual_eastings = []
         history_northings = []
         history_eastings = []
         prediction_northings = []
@@ -251,12 +259,20 @@ class ShowLaptop(QWidget):
 
             position_northings.append(position_ne[0])
             position_eastings.append(position_ne[1])
+            track_id = int(track.get("id", 0))
+            virtual_position_ne = np.asarray(
+                track.get("virtual_position_ne", position_ne),
+                dtype=float,
+            ).reshape(2)
+            if np.isfinite(virtual_position_ne).all():
+                virtual_northings.append(virtual_position_ne[0])
+                virtual_eastings.append(virtual_position_ne[1])
             self._append_track_segments(history_northings, history_eastings, track.get("history_ne", []))
             self._append_track_segments(prediction_northings, prediction_eastings, track.get("prediction_ne", []))
 
             heading_deg = float(track.get("heading_deg", np.nan))
             if np.isfinite(heading_deg):
-                summaries.append(f"#{int(track.get('id', 0))} {heading_deg:.0f}deg")
+                summaries.append(f"#{track_id} {heading_deg:.0f}deg")
 
             speed_m_s = float(track.get("speed_m_s", np.linalg.norm(velocity_ne)))
             if np.isfinite(speed_m_s) and speed_m_s >= 1e-3 and np.isfinite(velocity_ne).all():
@@ -267,10 +283,26 @@ class ShowLaptop(QWidget):
                 direction_eastings.extend([position_ne[1], end_ne[1], np.nan])
 
         self.obstacle_ekf_position.cb_set_data(position_northings, position_eastings)
+        self.obstacle_virtual_position.cb_set_data(virtual_northings, virtual_eastings)
         self.obstacle_ekf_history.cb_set_data(history_northings, history_eastings)
         self.obstacle_ekf_prediction.cb_set_data(prediction_northings, prediction_eastings)
         self.obstacle_ekf_direction.cb_set_data(direction_northings, direction_eastings)
         self.obstacle_summary_signal.emit("Obstacle EKF: " + " | ".join(summaries[:3]) if summaries else "")
+
+    def _update_virtual_collision_position_plot(self):
+        northings = []
+        eastings = []
+        for collision in self.Laptop.virtual_collision_visuals():
+            collision_position_ne = np.asarray(
+                collision.get("collision_position_ne", [np.nan, np.nan]),
+                dtype=float,
+            ).reshape(2)
+            if not np.isfinite(collision_position_ne).all():
+                continue
+            northings.append(collision_position_ne[0])
+            eastings.append(collision_position_ne[1])
+
+        self.virtual_collision_position.cb_set_data(northings, eastings)
 
     def _update_lidar_plot(self, lidar_cloud_ne):
         lidar_timestamp_s = getattr(self.Laptop, "latest_lidar_received_s", None)
@@ -306,7 +338,7 @@ class ShowLaptop(QWidget):
 
 
     def update(self):
-        """Generate data at 2Hz"""
+        """Run control and visualization updates at the configured rate."""
         while self.running:
                     
             right_rate, left_rate, lastdt, current_heading, North, East, sensed_yaw_rate, sensed_yaw, imu_time1, sensed_pos_northings_m, sensed_pos_eastings_m, sensed_pos_yaw_rad, ARUCO_time1, Waypoints, reference_path, depth, depth_time1, mission_complete, lidar_cloud_ne = self.Laptop.loop()
@@ -353,6 +385,7 @@ class ShowLaptop(QWidget):
             self._update_lidar_plot(lidar_cloud_ne)
             self._update_apf_plot()
             self._update_obstacle_tracks_plot()
+            self._update_virtual_collision_position_plot()
             
             if lastdt != None:
                 self.dtplot.cb_append_data_point(lastdt, self.TFS)

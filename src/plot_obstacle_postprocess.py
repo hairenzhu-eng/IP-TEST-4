@@ -293,6 +293,22 @@ def infer_safe_distance(*source_paths, fallback=1.4):
                 safety_domain_m = parse_float(settings.get("safety_domain_m"))
                 if np.isfinite(safety_domain_m) and safety_domain_m > 0.0:
                     return float(safety_domain_m)
+                reference_dcpa_m = parse_float(
+                    settings.get("reference_dcpa_threshold_m")
+                )
+                if np.isfinite(reference_dcpa_m) and reference_dcpa_m > 0.0:
+                    return float(reference_dcpa_m)
+                dcpa_scale = parse_float(settings.get("dcpa_cluster_scale"))
+                minimum_radius_m = parse_float(
+                    settings.get("obstacle_min_equivalent_radius_m")
+                )
+                if (
+                    np.isfinite(dcpa_scale)
+                    and dcpa_scale > 0.0
+                    and np.isfinite(minimum_radius_m)
+                    and minimum_radius_m > 0.0
+                ):
+                    return float(dcpa_scale * minimum_radius_m)
 
     return float(fallback)
 

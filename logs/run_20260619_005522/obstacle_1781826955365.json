@@ -1,0 +1,82 @@
+{
+  "t": 33.21125316619873,
+  "timestamp_s": 1781826955.3649812,
+  "robot_pos": [
+    3.9655088112347556,
+    1.5927659265926422
+  ],
+  "robot_yaw_rad": 1.3074291654217451,
+  "cloud": [],
+  "clusters": [
+    {
+      "label": 0,
+      "point_count": 34,
+      "centre_body": [
+        -0.40764470316685036,
+        -0.24820691159537797
+      ],
+      "centre_ne": [
+        4.0864221987804115,
+        1.1068657117736111
+      ],
+      "distance_m": 0.4772639468718597,
+      "angle_rad": -2.5946689469746027,
+      "angle_deg": -148.6635798952983,
+      "min_distance_m": 0.41936855142088386,
+      "cluster_radius_m": 0.21469368580319456,
+      "cluster_size_m": 0.2959879711686159,
+      "equivalent_radius_m": 0.21469368580319456,
+      "safety_radius_m": 0.6440810574095837,
+      "influence_radius_m": 0.6440810574095837,
+      "activation_radius_m": 1.6440810574095837
+    }
+  ],
+  "tracks": [],
+  "virtual_obstacles": [],
+  "apf": {
+    "navigation_mode": "apf_colreg",
+    "encounter": "static_obstacle",
+    "colreg_rule": "none",
+    "side": -1.0,
+    "dcpa_m": null,
+    "tcpa_s": null,
+    "force_body": [
+      24.123157306166615,
+      6.535907542418585
+    ],
+    "repulsive_force_body": [
+      21.675166113432628,
+      13.48834226434078
+    ],
+    "attractive_force_body": [
+      2.4479911927339884,
+      -6.952434721922195
+    ],
+    "target_ne": [
+      6.065508811234755,
+      1.7509467691831948
+    ]
+  },
+  "apf_settings": {
+    "own_equivalent_radius_m": 0.3,
+    "safety_domain_m": 2.5,
+    "collision_horizon_s": 10.0,
+    "prediction_dt_s": 0.5,
+    "constant_descent_speed_m_s": 0.85,
+    "obstacle_ekf_prediction_enabled": false,
+    "obstacle_prediction_horizon_s": 5.0,
+    "obstacle_prediction_step_s": 0.5,
+    "dynamic_speed_enter_m_s": 0.06,
+    "dynamic_speed_exit_m_s": 0.04,
+    "prediction_min_samples": 3,
+    "prediction_min_time_span_s": 0.8,
+    "prediction_max_speed_std_m_s": 0.1,
+    "prediction_max_heading_var_rad2": 0.373156339238718,
+    "cluster_influence_scale": 3.0,
+    "safety_activation_margin_m": 1.0
+  },
+  "dbscan": {
+    "eps_m": 0.2,
+    "min_samples": 3
+  }
+}

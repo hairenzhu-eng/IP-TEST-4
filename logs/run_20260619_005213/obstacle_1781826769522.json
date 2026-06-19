@@ -1,0 +1,82 @@
+{
+  "t": 35.640979528427124,
+  "timestamp_s": 1781826769.522329,
+  "robot_pos": [
+    3.5703954139948966,
+    1.6783248625856366
+  ],
+  "robot_yaw_rad": 0.7521984010093311,
+  "cloud": [],
+  "clusters": [
+    {
+      "label": 0,
+      "point_count": 27,
+      "centre_body": [
+        -0.13806494939380973,
+        -0.8236053475688953
+      ],
+      "centre_ne": [
+        3.9876757326203727,
+        0.9448066011455504
+      ],
+      "distance_m": 0.8350974187453797,
+      "angle_rad": -1.7368868610459562,
+      "angle_deg": -99.51628662965877,
+      "min_distance_m": 0.7640409034403574,
+      "cluster_radius_m": 0.1715499780787031,
+      "cluster_size_m": 0.32050348277597634,
+      "equivalent_radius_m": 0.18,
+      "safety_radius_m": 0.54,
+      "influence_radius_m": 0.54,
+      "activation_radius_m": 1.54
+    }
+  ],
+  "tracks": [],
+  "virtual_obstacles": [],
+  "apf": {
+    "navigation_mode": "apf_colreg",
+    "encounter": "static_obstacle",
+    "colreg_rule": "none",
+    "side": 1.0,
+    "dcpa_m": null,
+    "tcpa_s": null,
+    "force_body": [
+      4.267016872987831,
+      0.33260374824534367
+    ],
+    "repulsive_force_body": [
+      1.9455711360767287,
+      8.60913907577154
+    ],
+    "attractive_force_body": [
+      2.321445736911102,
+      -8.276535327526195
+    ],
+    "target_ne": [
+      5.670395413994896,
+      0.40480660114555034
+    ]
+  },
+  "apf_settings": {
+    "own_equivalent_radius_m": 0.3,
+    "safety_domain_m": 2.5,
+    "collision_horizon_s": 10.0,
+    "prediction_dt_s": 0.5,
+    "constant_descent_speed_m_s": 0.85,
+    "obstacle_ekf_prediction_enabled": false,
+    "obstacle_prediction_horizon_s": 5.0,
+    "obstacle_prediction_step_s": 0.5,
+    "dynamic_speed_enter_m_s": 0.06,
+    "dynamic_speed_exit_m_s": 0.04,
+    "prediction_min_samples": 3,
+    "prediction_min_time_span_s": 0.8,
+    "prediction_max_speed_std_m_s": 0.1,
+    "prediction_max_heading_var_rad2": 0.373156339238718,
+    "cluster_influence_scale": 3.0,
+    "safety_activation_margin_m": 1.0
+  },
+  "dbscan": {
+    "eps_m": 0.2,
+    "min_samples": 3
+  }
+}

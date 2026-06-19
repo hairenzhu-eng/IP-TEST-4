@@ -1,0 +1,177 @@
+{
+  "t": 38.83528232574463,
+  "timestamp_s": 1781838799.2763848,
+  "robot_pos": [
+    3.4008706519315957,
+    1.6288566307687566
+  ],
+  "robot_yaw_rad": 5.176769179046858,
+  "cloud": [
+    [
+      4.603607910285451,
+      0.9823281841776275
+    ],
+    [
+      4.600351954424272,
+      1.0005991238606378
+    ],
+    [
+      4.59724439425454,
+      1.0185245041344868
+    ],
+    [
+      4.594121056706085,
+      1.0361931268436564
+    ],
+    [
+      4.591022067354494,
+      1.0535954244680634
+    ],
+    [
+      4.587956202134155,
+      1.0707369299171623
+    ],
+    [
+      4.585093396394046,
+      1.0875577224416475
+    ],
+    [
+      4.582152209651288,
+      1.104184432413682
+    ],
+    [
+      4.579248885691287,
+      1.1205769875856881
+    ],
+    [
+      4.576386256576471,
+      1.1367429104855606
+    ],
+    [
+      4.5735664701718814,
+      1.1526898510623553
+    ],
+    [
+      4.57079008071169,
+      1.1684258627897144
+    ],
+    [
+      4.578307025300726,
+      1.1805981923859297
+    ],
+    [
+      4.562490674263262,
+      1.2002032952587607
+    ],
+    [
+      4.560219786519755,
+      1.215203648222166
+    ],
+    [
+      4.579447729226152,
+      1.223819137438173
+    ],
+    [
+      4.6172406427820425,
+      1.2276788177583045
+    ],
+    [
+      4.659339753957067,
+      1.2312510225093471
+    ],
+    [
+      4.70635245032731,
+      1.2345389478294315
+    ],
+    [
+      4.704499080010427,
+      1.2506182776629862
+    ]
+  ],
+  "clusters": [
+    {
+      "label": 0,
+      "point_count": 20,
+      "centre_body": [
+        1.003345942487592,
+        0.8414203548343681
+      ],
+      "centre_ne": [
+        4.60047190133712,
+        1.134803319962269
+      ],
+      "distance_m": 1.3094622155052462,
+      "angle_rad": 0.697846886991845,
+      "angle_deg": 39.98368137097563,
+      "min_distance_m": 1.2425384918981384,
+      "cluster_radius_m": 0.15567516927868405,
+      "cluster_size_m": 0.31079209645088346,
+      "equivalent_radius_m": 0.18,
+      "safety_radius_m": 1.08,
+      "influence_radius_m": 1.08,
+      "activation_radius_m": 1.8,
+      "dcpa_threshold_m": 1.08,
+      "too_close_threshold_m": 0.44999999999999996
+    }
+  ],
+  "tracks": [],
+  "virtual_obstacles": [],
+  "apf": {
+    "navigation_mode": "apf_avoid",
+    "encounter": "none",
+    "colreg_rule": "none",
+    "side": 0.0,
+    "dcpa_m": null,
+    "tcpa_s": null,
+    "force_body": [
+      2.527488175681544,
+      -1.9273291884062607
+    ],
+    "repulsive_force_body": [
+      -10.385875613131041,
+      -8.37684555569498
+    ],
+    "attractive_force_body": [
+      12.913363788812585,
+      6.449516367288719
+    ],
+    "target_ne": [
+      5.500870651931596,
+      0.05480331996226884
+    ],
+    "overtaking_active": false,
+    "overtaking_track_id": null
+  },
+  "apf_settings": {
+    "own_equivalent_radius_m": 0.3,
+    "dcpa_cluster_scale": 6.0,
+    "too_close_cluster_scale": 2.5,
+    "reference_dcpa_threshold_m": 1.08,
+    "obstacle_min_equivalent_radius_m": 0.18,
+    "collision_horizon_s": 10.0,
+    "prediction_dt_s": 0.1,
+    "constant_descent_speed_m_s": 0.85,
+    "obstacle_ekf_prediction_enabled": false,
+    "obstacle_prediction_horizon_s": 5.0,
+    "obstacle_prediction_step_s": 0.5,
+    "dynamic_speed_enter_m_s": 0.06,
+    "dynamic_speed_exit_m_s": 0.04,
+    "prediction_min_samples": 2,
+    "prediction_min_time_span_s": 0.15,
+    "prediction_max_speed_std_m_s": 0.1,
+    "prediction_max_heading_var_rad2": 0.373156339238718,
+    "cluster_influence_scale": 6.0,
+    "direction_decision_cluster_scale": 14.0,
+    "safety_activation_margin_cluster_scale": 4.0,
+    "side_lock_exit_margin_cluster_scale": 1.2,
+    "overtaking_speed_scale": 1.35,
+    "overtaking_min_speed_scale": 0.85,
+    "overtaking_yaw_rate_limit_rad_s": 0.5235987755982988,
+    "overtaking_route_lead_margin_m": 0.2,
+    "overtaking_completion_hold_s": 0.4
+  },
+  "dbscan": {
+    "eps_m": 0.2,
+    "min_samples": 3
+  }
+}

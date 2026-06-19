@@ -1,0 +1,82 @@
+{
+  "t": 71.62193870544434,
+  "timestamp_s": 1781826805.4969752,
+  "robot_pos": [
+    7.265586656769939,
+    2.240609474053519
+  ],
+  "robot_yaw_rad": 6.269244028375201,
+  "cloud": [],
+  "clusters": [
+    {
+      "label": 0,
+      "point_count": 15,
+      "centre_body": [
+        -0.32686541313789336,
+        -1.1746234050716027
+      ],
+      "centre_ne": [
+        6.900175043307973,
+        1.0659334929845263
+      ],
+      "distance_m": 1.2192543385396717,
+      "angle_rad": -1.8422024192881246,
+      "angle_deg": -105.55042363399922,
+      "min_distance_m": 1.179797823053299,
+      "cluster_radius_m": 0.14239699251113686,
+      "cluster_size_m": 0.23211093690622528,
+      "equivalent_radius_m": 0.18,
+      "safety_radius_m": 0.54,
+      "influence_radius_m": 0.54,
+      "activation_radius_m": 1.54
+    }
+  ],
+  "tracks": [],
+  "virtual_obstacles": [],
+  "apf": {
+    "navigation_mode": "apf_avoid",
+    "encounter": "none",
+    "colreg_rule": "none",
+    "side": 0.0,
+    "dcpa_m": null,
+    "tcpa_s": null,
+    "force_body": [
+      8.581544704356151,
+      -1.997024688536861
+    ],
+    "repulsive_force_body": [
+      1.148594957566153,
+      3.9012929641813425
+    ],
+    "attractive_force_body": [
+      7.4329497467899985,
+      -5.8983176527182035
+    ],
+    "target_ne": [
+      9.365586656769938,
+      0.5259334929845263
+    ]
+  },
+  "apf_settings": {
+    "own_equivalent_radius_m": 0.3,
+    "safety_domain_m": 2.5,
+    "collision_horizon_s": 10.0,
+    "prediction_dt_s": 0.5,
+    "constant_descent_speed_m_s": 0.85,
+    "obstacle_ekf_prediction_enabled": false,
+    "obstacle_prediction_horizon_s": 5.0,
+    "obstacle_prediction_step_s": 0.5,
+    "dynamic_speed_enter_m_s": 0.06,
+    "dynamic_speed_exit_m_s": 0.04,
+    "prediction_min_samples": 3,
+    "prediction_min_time_span_s": 0.8,
+    "prediction_max_speed_std_m_s": 0.1,
+    "prediction_max_heading_var_rad2": 0.373156339238718,
+    "cluster_influence_scale": 3.0,
+    "safety_activation_margin_m": 1.0
+  },
+  "dbscan": {
+    "eps_m": 0.2,
+    "min_samples": 3
+  }
+}
